@@ -216,7 +216,7 @@ def run_baostock_download(valuation_only: bool = True) -> bool:
         from download_efficient import download_all_data as baostock_download
         baostock_download(
             skip_fundamentals=True,  # Mootdx handles fundamentals
-            skip_metadata=valuation_only,  # Skip metadata in valuation-only mode
+            skip_metadata=False,  # BaoStock owns index constituent metadata
             valuation_only=valuation_only,
         )
         return True

@@ -35,6 +35,7 @@ class BaoStockFetcher(BaseFetcher):
     _bs_logged_in = False
     _bs_login_count = 0
 
+    @retry(config=_BAOSTOCK_RETRY)
     def _do_login(self):
         """BaoStock-specific login implementation"""
         # BaoStock uses a global session, only login once
@@ -47,6 +48,7 @@ class BaoStockFetcher(BaseFetcher):
         BaoStockFetcher._bs_login_count += 1
 
     @classmethod
+    @retry(config=_BAOSTOCK_RETRY)
     def _ensure_login(cls):
         """Ensure BaoStock session is valid, re-login if needed"""
         if not cls._bs_logged_in:

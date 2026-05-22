@@ -1,4 +1,6 @@
-"""Tests for DuckDB writer: money_flow, lhb, and margin_trading tables."""
+"""Tests for DuckDB writer extra metadata tables."""
+
+import json
 
 import pandas as pd
 import pytest
@@ -84,3 +86,32 @@ class TestWriteMarginTrading:
             "SELECT * FROM margin_trading WHERE symbol = '000001.SZ'"
         ).fetchdf()
         assert len(result) == 1
+
+
+@pytest.mark.unit
+class TestWriteIndexConstituents:
+    def setup_method(self):
+        self.writer = DuckDBWriter(db_path=":memory:")
+
+    def teardown_method(self):
+        self.writer.close()
+
+    def test_write_and_replace(self):
+        self.writer.write_index_constituents(
+            "20260519", "000300.SS", ["600000.SS", "000001.SZ"]
+        )
+        self.writer.write_index_constituents(
+            "20260519", "000300.SS", ["600000.SS", "600519.SS"]
+        )
+
+        result = self.writer.conn.execute(
+            """
+            SELECT date, index_code, symbols
+            FROM index_constituents
+            WHERE date = '20260519' AND index_code = '000300.SS'
+            """
+        ).fetchone()
+
+        assert result[0] == "20260519"
+        assert result[1] == "000300.SS"
+        assert json.loads(result[2]) == ["600000.SS", "600519.SS"]

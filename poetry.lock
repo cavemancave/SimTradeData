@@ -199,14 +199,14 @@ dev = ["backports.zoneinfo ; python_version < \"3.9\"", "freezegun (>=1.0,<2.0)"
 
 [[package]]
 name = "baostock"
-version = "0.8.9"
+version = "0.9.1"
 description = "A tool for obtaining historical data of China stock market"
 optional = false
 python-versions = "*"
 groups = ["main", "dev"]
 files = [
-    {file = "baostock-0.8.9-py3-none-any.whl", hash = "sha256:7a51fb30cd6b4325f5517198e350dc2fffaaab2923cd132b9f747b8b73ae7303"},
-    {file = "baostock-0.8.9.tar.gz", hash = "sha256:8169cdbed14fa442ace63c59549bef3f92b0c3dd1df9e5d9069f7bd04a76b0da"},
+    {file = "baostock-0.9.1-py3-none-any.whl", hash = "sha256:a30749f095fd58ecd7ba3799dad605d355ad8e6d19310bc437039e1e526f15fe"},
+    {file = "baostock-0.9.1.tar.gz", hash = "sha256:5ec3a44cbec9471872b0a4ae02c39aea29db688bb740b769167393bc6e244a39"},
 ]
 
 [package.dependencies]
@@ -4006,4 +4006,4 @@ repair = ["scipy (>=1.6.3)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "b687569c4e0c52617feafb1d0830b6604aef4b2aa00c45d8543e1cfcd1e78605"
+content-hash = "d59f85926d420d4eb140cb1b36d454986324e165175fe4b5983b15d9aa1bf28e"

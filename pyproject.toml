@@ -8,7 +8,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.10,<4.0"
 dependencies = [
-    "baostock>=0.8.9,<0.9.0",
+    "baostock>=0.9.1,<1.0.0",
     "tqdm>=4.67.1,<5.0.0",
     "duckdb>=1.2.0,<2.0.0",
     "pyarrow>=19.0.0,<20.0.0",
@@ -38,6 +38,6 @@ pytest-benchmark = "^5.1.0"
 pydantic = "^2.12.4"
 cachetools = "^6.2.1"
 joblib = "^1.5.2"
-baostock = "^0.8.9"
+baostock = "^0.9.1"
 jupyter = "^1.1.1"
 numpy = "<2"
