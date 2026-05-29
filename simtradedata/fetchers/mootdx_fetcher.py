@@ -154,8 +154,27 @@ class MootdxFetcher(BaseFetcher):
             )
 
             if df is None or df.empty:
-                logger.debug(f"No daily data for {symbol}")
-                return pd.DataFrame()
+                # k() may return empty for date ranges starting in current year
+                # (TDX daily file format limitation). Fall back to bars() which
+                # returns the latest 800 daily bars.
+                current_year = str(datetime.now().year)
+                if start_date[:4] >= current_year:
+                    logger.debug(
+                        f"k() returned empty for {symbol}, falling back to bars()"
+                    )
+                    df = self._client.bars(
+                        symbol=code,
+                        frequency=FREQ_DAILY,
+                        start=0,
+                        count=800,
+                    )
+                if df is None or df.empty:
+                    logger.debug(f"No daily data for {symbol}")
+                    return pd.DataFrame()
+                if start_date[:4] >= current_year:
+                    df = df.drop(columns=["datetime"], errors="ignore")
+                    df = df.rename_axis("date").reset_index()
+                    df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
 
             # mootdx k() returns 'date' as both index and column; drop index
             df = df.reset_index(drop=True)
