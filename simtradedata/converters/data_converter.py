@@ -364,6 +364,8 @@ class DataConverter:
             "stock_name": row.get("code_name", ""),
             "listed_date": pd.to_datetime(row.get("ipoDate", ""), errors="coerce"),
             "de_listed_date": pd.to_datetime(row.get("outDate", ""), errors="coerce"),
+            "security_type": row.get("type", ""),
+            "listing_status": row.get("status", ""),
             "has_info": True,
             "blocks": "{}",  # TODO: Fetch industry classification
         }

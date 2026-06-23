@@ -420,9 +420,13 @@ poetry run python scripts/download.py
 # 2. Export to Parquet
 poetry run python scripts/export_parquet.py              # CN → data/export/cn/
 poetry run python scripts/export_parquet.py --market us  # US → data/export/us/
+
+# 3. Optional: export a client delta package for downstream local merge/rebuild
+poetry run python scripts/export_parquet.py --delta --base-version 2026-06-20 --target-version 2026-06-22
 ```
 
 Step 1 automatically detects the latest date of existing data in DuckDB and only downloads the delta. When there are no new trading days, all stocks are skipped in seconds.
+Delta export contains changed symbol-table rows and a manifest for the requested version window. First install, periodic reconciliation, and failed delta recovery still use the full Parquet export.
 
 ### Data Quality
 - Data sourced from BaoStock free data service

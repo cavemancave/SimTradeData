@@ -6,6 +6,7 @@ This module provides incremental data storage using DuckDB,
 with automatic upsert (INSERT OR REPLACE) for deduplication.
 """
 
+import hashlib
 import json
 import logging
 from datetime import datetime
@@ -32,8 +33,10 @@ class DuckDBWriter:
     - Export to PTrade Parquet format
     """
 
-    # A-share stock code filter (excludes indices, B-shares, BJ exchange, etc.)
-    # Pattern: {prefix}.{market} where prefix is 6-digit numeric
+    # Legacy code-pattern fallback for databases created before
+    # stock_metadata.security_type was populated from BaoStock query_stock_basic().
+    # New exports should use _cn_stock_filter_sql(), which prefers BaoStock's
+    # official security type classification.
     _CN_STOCK_FILTER = (
         "(symbol LIKE '000___.SZ' OR symbol LIKE '001___.SZ' "
         "OR symbol LIKE '002___.SZ' OR symbol LIKE '003___.SZ' "
@@ -152,9 +155,12 @@ class DuckDBWriter:
                 stock_name VARCHAR,
                 listed_date VARCHAR,
                 de_listed_date VARCHAR,
+                security_type VARCHAR,
+                listing_status VARCHAR,
                 blocks VARCHAR
             )
         """)
+        self._migrate_stock_metadata()
 
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS benchmark (
@@ -262,6 +268,21 @@ class DuckDBWriter:
         """)
 
         self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS data_change_log (
+                table_name VARCHAR NOT NULL,
+                symbol VARCHAR,
+                date DATE,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (table_name, symbol, date)
+            )
+        """)
+
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_data_change_log_table_date
+            ON data_change_log (table_name, changed_at, date)
+        """)
+
+        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS version_info (
                 key VARCHAR PRIMARY KEY,
                 value VARCHAR
@@ -292,6 +313,26 @@ class DuckDBWriter:
                 ALTER TABLE fundamentals_progress ADD COLUMN file_hash VARCHAR
             """)
             logger.info("Added file_hash column to fundamentals_progress")
+
+    def _migrate_stock_metadata(self) -> None:
+        """Migrate stock_metadata to keep official BaoStock type/status fields."""
+        columns = self.conn.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'stock_metadata'
+        """).fetchall()
+        column_names = {row[0] for row in columns}
+
+        if "security_type" not in column_names:
+            self.conn.execute("""
+                ALTER TABLE stock_metadata ADD COLUMN security_type VARCHAR
+            """)
+            logger.info("Added security_type column to stock_metadata")
+
+        if "listing_status" not in column_names:
+            self.conn.execute("""
+                ALTER TABLE stock_metadata ADD COLUMN listing_status VARCHAR
+            """)
+            logger.info("Added listing_status column to stock_metadata")
 
     def get_sampled_dates(self) -> list:
         """Get list of dates that have already been sampled"""
@@ -479,6 +520,39 @@ class DuckDBWriter:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    def _record_symbol_changes(self, table_name: str, df: pd.DataFrame) -> None:
+        """Record symbol/date rows touched by an upsert for delta export."""
+        if df.empty or "symbol" not in df.columns or "date" not in df.columns:
+            return
+        changes = df[["symbol", "date"]].dropna().drop_duplicates().copy()
+        if changes.empty:
+            return
+        changes["table_name"] = table_name
+        changes["date"] = pd.to_datetime(changes["date"]).dt.date
+        self.conn.register("_data_change_rows", changes)
+        try:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO data_change_log (table_name, symbol, date, changed_at)
+                SELECT table_name, symbol, date, CURRENT_TIMESTAMP FROM _data_change_rows
+            """)
+        finally:
+            self.conn.unregister("_data_change_rows")
+
+    def _record_stock_metadata_changes(self, symbols: list[str]) -> None:
+        """Record metadata-only symbol changes for delta export."""
+        if not symbols:
+            return
+        changes = pd.DataFrame({"table_name": "stock_metadata", "symbol": sorted(set(symbols))})
+        changes["date"] = pd.to_datetime("1900-01-01").date()
+        self.conn.register("_metadata_change_rows", changes)
+        try:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO data_change_log (table_name, symbol, date, changed_at)
+                SELECT table_name, symbol, date, CURRENT_TIMESTAMP FROM _metadata_change_rows
+            """)
+        finally:
+            self.conn.unregister("_metadata_change_rows")
+
     # ========================================
     # Core write methods (with upsert)
     # ========================================
@@ -519,6 +593,7 @@ class DuckDBWriter:
             INSERT OR REPLACE INTO stocks ({cols_str})
             SELECT {cols_str} FROM df
         """)
+        self._record_symbol_changes("stocks", df)
 
         logger.debug(f"Wrote {len(df)} market rows for {symbol}")
         return len(df)
@@ -562,6 +637,7 @@ class DuckDBWriter:
             INSERT OR REPLACE INTO valuation ({cols_str})
             SELECT {cols_str} FROM df
         """)
+        self._record_symbol_changes("valuation", df)
 
         logger.debug(f"Wrote {len(df)} valuation rows for {symbol}")
         return len(df)
@@ -636,6 +712,7 @@ class DuckDBWriter:
             SELECT {cols_str} FROM df
             {conflict_clause}
         """)
+        self._record_symbol_changes("fundamentals", df)
 
         logger.debug(f"Wrote {len(df)} fundamental rows for {symbol}")
         return len(df)
@@ -672,6 +749,7 @@ class DuckDBWriter:
             INSERT OR REPLACE INTO exrights ({cols_str})
             SELECT {cols_str} FROM df
         """)
+        self._record_symbol_changes("exrights", df)
 
         logger.debug(f"Wrote {len(df)} exrights rows for {symbol}")
         return len(df)
@@ -748,7 +826,20 @@ class DuckDBWriter:
         if "index" in df.columns and "symbol" not in df.columns:
             df = df.rename(columns={"index": "symbol"})
 
-        columns = ["symbol", "stock_name", "listed_date", "de_listed_date", "blocks"]
+        if "type" in df.columns and "security_type" not in df.columns:
+            df = df.rename(columns={"type": "security_type"})
+        if "status" in df.columns and "listing_status" not in df.columns:
+            df = df.rename(columns={"status": "listing_status"})
+
+        columns = [
+            "symbol",
+            "stock_name",
+            "listed_date",
+            "de_listed_date",
+            "security_type",
+            "listing_status",
+            "blocks",
+        ]
         available = [c for c in columns if c in df.columns]
         df = df[available]
 
@@ -757,6 +848,8 @@ class DuckDBWriter:
             INSERT OR REPLACE INTO stock_metadata ({cols_str})
             SELECT {cols_str} FROM df
         """)
+        if "symbol" in df.columns:
+            self._record_stock_metadata_changes(df["symbol"].dropna().astype(str).tolist())
 
         logger.info(f"Wrote {len(df)} stock metadata records")
         return len(df)
@@ -1018,6 +1111,7 @@ class DuckDBWriter:
                 SUM(CASE WHEN roa_ttm IS NOT NULL THEN 1 ELSE 0 END)
             FROM fundamentals
         """).fetchone()
+        updated = tuple(value or 0 for value in updated)
         logger.info(
             f"Derived fundamentals: roa={updated[0]:,} roe_ttm={updated[1]:,} roa_ttm={updated[2]:,}"
         )
@@ -1060,6 +1154,703 @@ class DuckDBWriter:
         self._write_manifest(output_path, market=market)
 
         logger.info(f"Export complete: {output_path}")
+
+    def export_delta(
+        self,
+        output_dir: str,
+        base_version: str,
+        target_version: str | None = None,
+        market: str = "cn",
+    ) -> None:
+        """Export changed rows for client-side delta merge."""
+        output_path = Path(output_dir)
+        if output_path.exists():
+            import shutil
+
+            shutil.rmtree(output_path)
+
+        output_path.mkdir(parents=True, exist_ok=True)
+        target_version = target_version or self.get_max_date("stocks")
+        if not target_version:
+            raise ValueError("target_version is required when stocks table is empty")
+        if target_version <= base_version:
+            raise ValueError("target_version must be newer than base_version")
+
+        self.compute_derived_fundamentals()
+
+        tables = ["stocks", "valuation", "fundamentals", "exrights"]
+        changed_tables = []
+        changed_symbols = set()
+        files = []
+
+        for table in tables:
+            table_dir = output_path / table
+            table_dir.mkdir(parents=True, exist_ok=True)
+            rows, symbols = self._export_delta_table(
+                table, table_dir, base_version, target_version, market=market
+            )
+            if rows == 0:
+                table_dir.rmdir()
+                continue
+            changed_tables.append({"table": table, "rows": rows, "symbols": len(symbols)})
+            changed_symbols.update(symbols)
+
+        metadata_dir = output_path / "metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        changed_symbols.update(self._changed_stock_metadata_symbols(base_version))
+        changed_symbols = set(self._filter_symbols_for_market(changed_symbols, market))
+        metadata_tables = self._export_delta_metadata(
+            metadata_dir,
+            base_version=base_version,
+            target_version=target_version,
+            market=market,
+            changed_symbols=sorted(changed_symbols),
+        )
+        changed_tables.extend(metadata_tables)
+
+        if not changed_tables:
+            import shutil
+
+            shutil.rmtree(output_path)
+            raise ValueError("no changed rows for delta export")
+
+        self._write_delta_version_file(metadata_dir, target_version, market)
+        for path in sorted(output_path.rglob("*.parquet")):
+            files.append({
+                "path": path.relative_to(output_path).as_posix(),
+                "sha256": self._sha256_file(path),
+                "size": path.stat().st_size,
+            })
+
+        self._write_delta_manifest(
+            output_path,
+            base_version=base_version,
+            target_version=target_version,
+            market=market,
+            changed_tables=changed_tables,
+            changed_symbols=sorted(changed_symbols),
+            files=files,
+        )
+
+    def _changed_stock_metadata_symbols(self, base_version: str) -> list[str]:
+        return [r[0] for r in self.conn.execute("""
+            SELECT DISTINCT symbol
+            FROM data_change_log
+            WHERE table_name = 'stock_metadata'
+              AND symbol IS NOT NULL
+              AND changed_at::DATE > ?::DATE
+            ORDER BY symbol
+        """, [base_version]).fetchall()]
+
+    def _cn_stock_filter_sql(self, symbol_expr: str = "symbol") -> str:
+        """Official-first CN stock filter using BaoStock security_type when available."""
+        fallback = self._CN_STOCK_FILTER.replace("symbol", symbol_expr)
+        has_security_type_metadata = """
+            EXISTS (
+                SELECT 1 FROM stock_metadata
+                WHERE security_type IS NOT NULL AND security_type != ''
+            )
+        """
+        return f"""(
+            (
+                {has_security_type_metadata}
+                AND EXISTS (
+                    SELECT 1 FROM stock_metadata sm
+                    WHERE sm.symbol = {symbol_expr}
+                      AND sm.security_type = '1'
+                      AND ({symbol_expr} LIKE '%.SZ' OR {symbol_expr} LIKE '%.SS')
+                )
+            )
+            OR (
+                NOT {has_security_type_metadata}
+                AND {fallback}
+            )
+        )"""
+
+    def _filter_symbols_for_market(self, symbols, market: str) -> list[str]:
+        if market != "cn":
+            return sorted(symbols)
+        symbols = sorted(symbol for symbol in symbols if isinstance(symbol, str))
+        if not symbols:
+            return []
+        candidates = pd.DataFrame({"symbol": symbols})
+        self.conn.register("_symbol_filter_candidates", candidates)
+        try:
+            return [r[0] for r in self.conn.execute(
+                f"""
+                SELECT c.symbol
+                FROM _symbol_filter_candidates c
+                LEFT JOIN stock_metadata sm ON sm.symbol = c.symbol
+                WHERE {self._cn_stock_filter_sql('c.symbol')}
+                ORDER BY c.symbol
+                """
+            ).fetchall()]
+        finally:
+            self.conn.unregister("_symbol_filter_candidates")
+
+    def _export_delta_table(
+        self,
+        table: str,
+        output_dir: Path,
+        base_version: str,
+        target_version: str,
+        market: str = "cn",
+    ) -> tuple[int, list[str]]:
+        """Export one symbol-keyed table as per-symbol delta parquet files."""
+        if table == "stocks":
+            return self._export_delta_stocks_table(
+                output_dir, base_version, target_version, market=market
+            )
+        if table == "fundamentals":
+            return self._export_delta_fundamentals_table(
+                output_dir, base_version, target_version, market=market
+            )
+        if table == "valuation":
+            return self._export_delta_valuation_table(
+                output_dir, base_version, target_version, market=market
+            )
+        if table == "exrights":
+            return self._export_delta_exrights_table(
+                output_dir, base_version, target_version, market=market
+            )
+        raise ValueError(f"unsupported delta table: {table}")
+
+    def _copy_delta_symbol_temp_table(
+        self,
+        table_name: str,
+        temp_table: str,
+        output_dir: Path,
+        base_version: str,
+        target_version: str,
+    ) -> tuple[int, list[str]]:
+        ranges_table = f"_delta_{table_name}_ranges"
+        self.conn.execute(f"""
+            CREATE OR REPLACE TEMP TABLE {ranges_table} AS
+            SELECT symbol, MIN(date) AS min_date
+            FROM (
+                SELECT symbol, date
+                FROM data_change_log
+                WHERE table_name = ?
+                  AND symbol IS NOT NULL
+                  AND date IS NOT NULL
+                  AND date <= ?::DATE
+                  AND (date > ?::DATE OR changed_at::DATE > ?::DATE)
+                UNION ALL
+                SELECT DISTINCT symbol, date
+                FROM {temp_table}
+                WHERE date > ?::DATE AND date <= ?::DATE
+            ) changed
+            GROUP BY symbol
+        """, [
+            table_name,
+            target_version,
+            base_version,
+            base_version,
+            base_version,
+            target_version,
+        ])
+        rows = self.conn.execute(f"""
+            SELECT COUNT(*)
+            FROM {temp_table} t
+            JOIN {ranges_table} r ON r.symbol = t.symbol
+            WHERE t.date >= r.min_date AND t.date <= ?::DATE
+        """, [target_version]).fetchone()[0]
+        if rows == 0:
+            return 0, []
+
+        symbols = [r[0] for r in self.conn.execute(f"""
+            SELECT DISTINCT t.symbol
+            FROM {temp_table} t
+            JOIN {ranges_table} r ON r.symbol = t.symbol
+            WHERE t.date >= r.min_date AND t.date <= ?::DATE
+            ORDER BY t.symbol
+        """, [target_version]).fetchall()]
+
+        for symbol in symbols:
+            symbol_escaped = symbol.replace("'", "''")
+            output_file = output_dir / f"{symbol}.parquet"
+            self.conn.execute(f"""
+                COPY (
+                    SELECT t.* EXCLUDE (symbol)
+                    FROM {temp_table} t
+                    JOIN {ranges_table} r ON r.symbol = t.symbol
+                    WHERE t.symbol = '{symbol_escaped}'
+                      AND t.date >= r.min_date AND t.date <= ?::DATE
+                    ORDER BY t.date
+                ) TO '{output_file}' (FORMAT PARQUET, CODEC 'ZSTD')
+            """, [target_version])
+
+        return rows, symbols
+
+    def _export_delta_stocks_table(
+        self,
+        output_dir: Path,
+        base_version: str,
+        target_version: str,
+        market: str = "cn",
+    ) -> tuple[int, list[str]]:
+        cn_filter = f"WHERE {self._cn_stock_filter_sql('stocks.symbol')}" if market == "cn" else ""
+        if market == "us":
+            high_limit_sql = "CAST(NULL AS DOUBLE) AS high_limit"
+            low_limit_sql = "CAST(NULL AS DOUBLE) AS low_limit"
+        else:
+            high_limit_sql = """
+                CASE
+                    WHEN LEFT(symbol, 3) IN ('300', '301', '688', '689')
+                         AND date >= '2020-08-24' THEN ROUND(preclose * 1.20, 2)
+                    ELSE ROUND(preclose * 1.10, 2)
+                END AS high_limit
+            """
+            low_limit_sql = """
+                CASE
+                    WHEN LEFT(symbol, 3) IN ('300', '301', '688', '689')
+                         AND date >= '2020-08-24' THEN ROUND(preclose * 0.80, 2)
+                    ELSE ROUND(preclose * 0.90, 2)
+                END AS low_limit
+            """
+
+        self.conn.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _delta_stocks_export AS
+            WITH trade_cal AS (
+                SELECT DISTINCT date FROM stocks
+                UNION
+                SELECT date FROM trade_days
+            ),
+            lifespans AS (
+                SELECT symbol, MIN(date) AS first_date, MAX(date) AS last_date
+                FROM stocks {cn_filter} GROUP BY symbol
+            ),
+            joined AS (
+                SELECT
+                    ls.symbol,
+                    tc.date,
+                    CASE WHEN s.volume > 0 THEN s.open END AS open,
+                    CASE WHEN s.volume > 0 THEN s.close END AS close,
+                    CASE WHEN s.volume > 0 THEN s.high END AS high,
+                    CASE WHEN s.volume > 0 THEN s.low END AS low,
+                    CASE WHEN s.volume > 0 THEN s.preclose END AS preclose,
+                    COALESCE(s.volume, 0) AS volume,
+                    COALESCE(s.money, 0.0) AS money
+                FROM lifespans ls
+                CROSS JOIN trade_cal tc
+                LEFT JOIN stocks s ON s.symbol = ls.symbol AND s.date = tc.date
+                WHERE tc.date >= ls.first_date AND tc.date <= ls.last_date
+            ),
+            gap_filled AS (
+                SELECT
+                    symbol, date,
+                    COALESCE(open, last_value(close IGNORE NULLS) OVER w) AS open,
+                    COALESCE(close, last_value(close IGNORE NULLS) OVER w) AS close,
+                    COALESCE(high, last_value(close IGNORE NULLS) OVER w) AS high,
+                    COALESCE(low, last_value(close IGNORE NULLS) OVER w) AS low,
+                    preclose, volume, money
+                FROM joined
+                WINDOW w AS (
+                    PARTITION BY symbol ORDER BY date
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                )
+            ),
+            with_lag AS (
+                SELECT
+                    symbol, date,
+                    open, close, high, low,
+                    LAG(close) OVER (PARTITION BY symbol ORDER BY date) AS lag_close,
+                    last_value(CASE WHEN volume > 0 THEN date END IGNORE NULLS) OVER (
+                        PARTITION BY symbol ORDER BY date
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    ) AS last_active_date,
+                    preclose AS stored_preclose,
+                    volume, money
+                FROM gap_filled
+            ),
+            adj AS (
+                SELECT
+                    wl.symbol, wl.date,
+                    SUM(COALESCE(ex.bonus_ps, 0)
+                        - COALESCE(ex.rationed_px, 0) * COALESCE(ex.rationed_ps, 0)
+                    ) AS total_deduction,
+                    EXP(SUM(LN(
+                        1 + COALESCE(ex.allotted_ps, 0) + COALESCE(ex.rationed_ps, 0)
+                    ))) AS total_divisor,
+                    COUNT(ex.date) AS event_count
+                FROM with_lag wl
+                INNER JOIN exrights ex ON ex.symbol = wl.symbol
+                    AND ex.date > wl.last_active_date AND ex.date <= wl.date
+                GROUP BY wl.symbol, wl.date
+            ),
+            filled AS (
+                SELECT
+                    wl.symbol,
+                    wl.date::TIMESTAMP_NS AS date,
+                    wl.open, wl.close, wl.high, wl.low,
+                    CASE
+                        WHEN adj.event_count > 0 AND wl.lag_close IS NOT NULL
+                             AND wl.volume > 0 THEN
+                            ROUND(
+                                (wl.lag_close - adj.total_deduction)
+                                / adj.total_divisor,
+                                2)
+                        ELSE COALESCE(wl.lag_close, wl.stored_preclose)
+                    END AS preclose,
+                    wl.volume, wl.money
+                FROM with_lag wl
+                LEFT JOIN adj ON adj.symbol = wl.symbol AND adj.date = wl.date
+            )
+            SELECT
+                symbol, date, open, close, high, low,
+                {high_limit_sql},
+                {low_limit_sql},
+                preclose, volume, money
+            FROM filled
+        """)
+        try:
+            return self._copy_delta_symbol_temp_table(
+                "stocks", "_delta_stocks_export", output_dir, base_version, target_version
+            )
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS _delta_stocks_export")
+
+    def _export_delta_fundamentals_table(
+        self,
+        output_dir: Path,
+        base_version: str,
+        target_version: str,
+        market: str = "cn",
+    ) -> tuple[int, list[str]]:
+        cn_filter = f"WHERE {self._cn_stock_filter_sql('fundamentals.symbol')}" if market == "cn" else ""
+        self.conn.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _delta_fundamentals_export AS
+            SELECT
+                symbol,
+                date::TIMESTAMP_NS AS date, publ_date,
+                operating_revenue_grow_rate, net_profit_grow_rate,
+                basic_eps_yoy, np_parent_company_yoy,
+                net_profit_ratio,
+                AVG(net_profit_ratio) OVER (
+                    PARTITION BY symbol ORDER BY date ROWS BETWEEN 3 PRECEDING AND CURRENT ROW
+                ) AS net_profit_ratio_ttm,
+                gross_income_ratio,
+                AVG(gross_income_ratio) OVER (
+                    PARTITION BY symbol ORDER BY date ROWS BETWEEN 3 PRECEDING AND CURRENT ROW
+                ) AS gross_income_ratio_ttm,
+                roa, roa_ttm,
+                roe, roe_ttm,
+                total_asset_grow_rate, total_asset_turnover_rate,
+                current_assets_turnover_rate, inventory_turnover_rate,
+                accounts_receivables_turnover_rate,
+                current_ratio, quick_ratio, debt_equity_ratio,
+                interest_cover, roic, roa_ebit_ttm,
+                total_shares, a_floats
+            FROM fundamentals
+            {cn_filter}
+        """)
+        try:
+            return self._copy_delta_symbol_temp_table(
+                "fundamentals", "_delta_fundamentals_export", output_dir, base_version, target_version
+            )
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS _delta_fundamentals_export")
+
+    def _export_delta_valuation_table(
+        self,
+        output_dir: Path,
+        base_version: str,
+        target_version: str,
+        market: str = "cn",
+    ) -> tuple[int, list[str]]:
+        cn_filter = (
+            f"WHERE {self._cn_stock_filter_sql('v.symbol')}"
+            if market == "cn" else ""
+        )
+        self.conn.execute(f"""
+            CREATE OR REPLACE TEMP TABLE _delta_valuation_export AS
+            SELECT
+                v.symbol,
+                v.date::TIMESTAMP_NS AS date,
+                v.pe_ttm, v.pb, v.ps_ttm, v.pcf,
+                f.roe, f.roe_ttm, f.roa, f.roa_ttm,
+                CASE WHEN v.pb > 0 THEN ROUND(s.close / v.pb, 4) ELSE NULL END AS naps,
+                f.total_shares, f.a_floats,
+                CASE WHEN f.total_shares > 0 AND s.close IS NOT NULL
+                     THEN ROUND(f.total_shares * s.close, 2) END AS total_value,
+                CASE WHEN f.a_floats > 0 AND s.close IS NOT NULL
+                     THEN ROUND(f.a_floats * s.close, 2) END AS float_value,
+                v.turnover_rate
+            FROM valuation v
+            ASOF JOIN (SELECT symbol, date, close FROM stocks) s
+                ON v.symbol = s.symbol AND v.date >= s.date
+            LEFT JOIN LATERAL (
+                SELECT total_shares, a_floats, roe, roe_ttm, roa, roa_ttm
+                FROM fundamentals f2
+                WHERE f2.symbol = v.symbol AND f2.date <= v.date
+                ORDER BY f2.date DESC LIMIT 1
+            ) f ON TRUE
+            {cn_filter}
+        """)
+        try:
+            return self._copy_delta_symbol_temp_table(
+                "valuation", "_delta_valuation_export", output_dir, base_version, target_version
+            )
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS _delta_valuation_export")
+
+    def _export_delta_exrights_table(
+        self,
+        output_dir: Path,
+        base_version: str,
+        target_version: str,
+        market: str = "cn",
+    ) -> tuple[int, list[str]]:
+        import numpy as np
+
+        cn_filter = f"AND {self._cn_stock_filter_sql('exrights.symbol')}" if market == "cn" else ""
+        symbols = [r[0] for r in self.conn.execute(f"""
+            SELECT DISTINCT symbol FROM (
+                SELECT symbol
+                FROM data_change_log
+                WHERE table_name = 'exrights'
+                  AND symbol IS NOT NULL
+                  AND date IS NOT NULL
+                  AND date <= ?::DATE
+                  AND (date > ?::DATE OR changed_at::DATE > ?::DATE)
+                UNION
+                SELECT symbol
+                FROM exrights
+                WHERE date > ?::DATE AND date <= ?::DATE {cn_filter}
+            ) changed
+            ORDER BY symbol
+        """, [
+            target_version,
+            base_version,
+            base_version,
+            base_version,
+            target_version,
+        ]).fetchall()]
+        if not symbols:
+            return 0, []
+
+        symbols_sql = ", ".join("'" + symbol.replace("'", "''") + "'" for symbol in symbols)
+        df_all = self.conn.execute(f"""
+            SELECT symbol, date::TIMESTAMP_NS AS date,
+                   allotted_ps, rationed_ps, rationed_px, bonus_ps, dividend
+            FROM exrights
+            WHERE symbol IN ({symbols_sql}) {cn_filter}
+            ORDER BY symbol, date
+        """).fetchdf()
+
+        base_ts = pd.Timestamp(base_version)
+        target_ts = pd.Timestamp(target_version)
+        rows = 0
+        written_symbols = []
+        for symbol, group in df_all.groupby("symbol", sort=True):
+            group = group.reset_index(drop=True)
+            n = len(group)
+            allotted = group["allotted_ps"].values
+            bonus = group["bonus_ps"].values
+            rationed = group["rationed_ps"].values
+            rationed_px = group["rationed_px"].values
+
+            fa = np.ones(n + 1, dtype="float64")
+            fb = np.zeros(n + 1, dtype="float64")
+            for i in range(n - 1, -1, -1):
+                m = 1.0 + allotted[i] + rationed[i]
+                fa[i] = fa[i + 1] / m
+                fb[i] = fa[i + 1] * (-bonus[i] + rationed[i] * rationed_px[i]) / m + fb[i + 1]
+
+            group["exer_forward_a"] = fa[:n]
+            group["exer_forward_b"] = fb[:n]
+            has_delta = (
+                (group["date"] > base_ts) & (group["date"] <= target_ts)
+            ).any()
+            if not has_delta:
+                continue
+            group.drop(columns=["symbol"]).to_parquet(
+                str(output_dir / f"{symbol}.parquet"),
+                index=False,
+                compression="zstd",
+            )
+            rows += len(group)
+            written_symbols.append(symbol)
+
+        return rows, written_symbols
+
+    def _export_delta_metadata(
+        self,
+        output_dir: Path,
+        base_version: str,
+        target_version: str,
+        market: str,
+        changed_symbols: list[str],
+    ) -> list[dict]:
+        """Export metadata rows needed by a delta package."""
+        changed_tables = []
+        if changed_symbols:
+            trade_days_rows = self._copy_delta_trade_days(output_dir, base_version, target_version)
+            if trade_days_rows:
+                changed_tables.append({"table": "trade_days", "rows": trade_days_rows})
+
+            benchmark_rows = self._copy_delta_benchmark(output_dir, base_version, target_version)
+            if benchmark_rows:
+                changed_tables.append({"table": "benchmark", "rows": benchmark_rows})
+
+            index_rows = self._copy_delta_json_date_table(
+                "index_constituents",
+                output_dir / "index_constituents.parquet",
+                base_version,
+                target_version,
+                "date, index_code, symbols::JSON::VARCHAR[] AS symbols",
+            )
+            if index_rows:
+                changed_tables.append({"table": "index_constituents", "rows": index_rows})
+
+            self._enrich_halt_status_from_volume()
+            status_rows = self._copy_delta_json_date_table(
+                "stock_status",
+                output_dir / "stock_status.parquet",
+                base_version,
+                target_version,
+                "date, status_type, symbols::JSON::VARCHAR[] AS symbols",
+            )
+            if status_rows:
+                changed_tables.append({"table": "stock_status", "rows": status_rows})
+
+        metadata_rows = self._copy_delta_stock_metadata(
+            output_dir, changed_symbols, base_version, market
+        )
+        if metadata_rows:
+            changed_tables.append({"table": "stock_metadata", "rows": metadata_rows})
+
+        return changed_tables
+
+    def _copy_delta_trade_days(
+        self, output_dir: Path, base_version: str, target_version: str
+    ) -> int:
+        rows = self.conn.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT date FROM (
+                    SELECT date FROM trade_days
+                    UNION
+                    SELECT DISTINCT date FROM stocks
+                )
+                WHERE date > ?::DATE AND date <= ?::DATE
+            )
+        """, [base_version, target_version]).fetchone()[0]
+        if rows:
+            self.conn.execute(f"""
+                COPY (
+                    SELECT DISTINCT date FROM (
+                        SELECT date FROM trade_days
+                        UNION
+                        SELECT DISTINCT date FROM stocks
+                    )
+                    WHERE date > ?::DATE AND date <= ?::DATE
+                    ORDER BY date
+                ) TO '{output_dir / "trade_days.parquet"}' (FORMAT PARQUET, CODEC 'ZSTD')
+            """, [base_version, target_version])
+        return rows
+
+    def _copy_delta_benchmark(
+        self, output_dir: Path, base_version: str, target_version: str
+    ) -> int:
+        benchmark_symbol = "000300.SS"
+        rows = self.conn.execute("""
+            SELECT COUNT(*) FROM stocks
+            WHERE symbol = ? AND date > ?::DATE AND date <= ?::DATE
+        """, [benchmark_symbol, base_version, target_version]).fetchone()[0]
+        if rows:
+            self.conn.execute(f"""
+                COPY (
+                    SELECT date, open, high, low, close, volume,
+                           COALESCE(money, 0.0) AS money
+                    FROM stocks
+                    WHERE symbol = ? AND date > ?::DATE AND date <= ?::DATE
+                    ORDER BY date
+                ) TO '{output_dir / "benchmark.parquet"}' (FORMAT PARQUET, CODEC 'ZSTD')
+            """, [benchmark_symbol, base_version, target_version])
+            return rows
+
+        rows = self.conn.execute("""
+            SELECT COUNT(*) FROM benchmark
+            WHERE date > ?::DATE AND date <= ?::DATE
+        """, [base_version, target_version]).fetchone()[0]
+        if rows:
+            self.conn.execute(f"""
+                COPY (
+                    SELECT * FROM benchmark
+                    WHERE date > ?::DATE AND date <= ?::DATE
+                    ORDER BY date
+                ) TO '{output_dir / "benchmark.parquet"}' (FORMAT PARQUET, CODEC 'ZSTD')
+            """, [base_version, target_version])
+        return rows
+
+    def _copy_delta_json_date_table(
+        self,
+        table: str,
+        output_file: Path,
+        base_version: str,
+        target_version: str,
+        select_columns: str,
+    ) -> int:
+        date_expr = "STRPTIME(date, '%Y%m%d')::DATE"
+        rows = self.conn.execute(f"""
+            SELECT COUNT(*) FROM {table}
+            WHERE {date_expr} > ?::DATE AND {date_expr} <= ?::DATE
+        """, [base_version, target_version]).fetchone()[0]
+        if rows:
+            self.conn.execute(f"""
+                COPY (
+                    SELECT {select_columns}
+                    FROM {table}
+                    WHERE {date_expr} > ?::DATE AND {date_expr} <= ?::DATE
+                    ORDER BY date
+                ) TO '{output_file}' (FORMAT PARQUET, CODEC 'ZSTD')
+            """, [base_version, target_version])
+        return rows
+
+    def _copy_delta_stock_metadata(
+        self,
+        output_dir: Path,
+        changed_symbols: list[str],
+        base_version: str,
+        market: str,
+    ) -> int:
+        metadata_symbols = self._changed_stock_metadata_symbols(base_version)
+        symbols = self._filter_symbols_for_market(set(changed_symbols) | set(metadata_symbols), market)
+        if not symbols:
+            return 0
+        symbols_sql = ", ".join("'" + symbol.replace("'", "''") + "'" for symbol in symbols)
+        cn_filter = f"AND {self._cn_stock_filter_sql('stock_metadata.symbol')}" if market == "cn" else ""
+        rows = self.conn.execute(f"""
+            SELECT COUNT(*) FROM stock_metadata
+            WHERE symbol IN ({symbols_sql}) {cn_filter}
+        """).fetchone()[0]
+        if rows:
+            self.conn.execute(f"""
+                COPY (
+                    SELECT * FROM stock_metadata
+                    WHERE symbol IN ({symbols_sql}) {cn_filter}
+                    ORDER BY symbol
+                ) TO '{output_dir / "stock_metadata.parquet"}'
+                (FORMAT PARQUET, CODEC 'ZSTD')
+            """)
+        return rows
+
+    def _write_delta_version_file(self, output_dir: Path, target_version: str, market: str) -> None:
+        cn_filter = f"WHERE {self._cn_stock_filter_sql('stocks.symbol')}" if market == "cn" else ""
+        result = self.conn.execute(f"""
+            SELECT
+                (SELECT COUNT(DISTINCT symbol) FROM stocks {cn_filter}) as num_stocks,
+                (SELECT MIN(date)::VARCHAR FROM stocks) as start_date
+        """).fetchone()
+        version_data = pd.DataFrame([
+            {
+                "version": target_version,
+                "num_stocks": result[0] or 0,
+                "export_date": datetime.now().strftime("%Y-%m-%d"),
+                "start_date": result[1] or "",
+            }
+        ])
+        version_data.to_parquet(output_dir / "version.parquet", index=False)
 
     def _export_per_symbol_table(
         self, table: str, output_dir: Path, market: str = "cn"
@@ -1144,11 +1935,11 @@ class DuckDBWriter:
         t0 = time.time()
 
         df_all = self.conn.execute(f"""
-            SELECT symbol, date::TIMESTAMP_NS AS date,
+            SELECT e.symbol, e.date::TIMESTAMP_NS AS date,
                    allotted_ps, rationed_ps, rationed_px, bonus_ps, dividend
-            FROM exrights
-            WHERE {self._CN_STOCK_FILTER}
-            ORDER BY symbol, date
+            FROM exrights e
+            WHERE {self._cn_stock_filter_sql("e.symbol")}
+            ORDER BY e.symbol, e.date
         """).fetchdf()
 
         if df_all.empty:
@@ -1206,8 +1997,8 @@ class DuckDBWriter:
                 current_ratio, quick_ratio, debt_equity_ratio,
                 interest_cover, roic, roa_ebit_ttm,
                 total_shares, a_floats
-            FROM fundamentals
-            WHERE {self._CN_STOCK_FILTER}
+            FROM fundamentals f
+            WHERE {self._cn_stock_filter_sql("f.symbol")}
         """)
 
         symbols = [r[0] for r in self.conn.execute(
@@ -1258,7 +2049,7 @@ class DuckDBWriter:
                 WHERE f2.symbol = v.symbol AND f2.date <= v.date
                 ORDER BY f2.date DESC LIMIT 1
             ) f ON TRUE
-            WHERE {self._CN_STOCK_FILTER.replace('symbol', 'v.symbol')}
+            WHERE {self._cn_stock_filter_sql("v.symbol")}
         """)
 
         symbols = [r[0] for r in self.conn.execute(
@@ -1287,7 +2078,10 @@ class DuckDBWriter:
         t0 = time.time()
 
         # Step 1: Build gap-filled table for all stocks at once
-        cn_filter = f"WHERE {self._CN_STOCK_FILTER}" if market == "cn" else ""
+        cn_filter = (
+            f"WHERE {self._cn_stock_filter_sql('s0.symbol')}"
+            if market == "cn" else ""
+        )
         logger.info("  Pre-computing gap-filled data for all stocks...")
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE _stocks_filled AS
@@ -1297,8 +2091,8 @@ class DuckDBWriter:
                 SELECT date FROM trade_days
             ),
             lifespans AS (
-                SELECT symbol, MIN(date) AS first_date, MAX(date) AS last_date
-                FROM stocks {cn_filter} GROUP BY symbol
+                SELECT s0.symbol, MIN(s0.date) AS first_date, MAX(s0.date) AS last_date
+                FROM stocks s0 {cn_filter} GROUP BY s0.symbol
             ),
             joined AS (
                 SELECT
@@ -1810,10 +2604,16 @@ class DuckDBWriter:
             rows,
             columns=["symbol", "stock_name", "listed_date", "de_listed_date", "blocks"],
         )
-        self.conn.execute(
-            "INSERT OR REPLACE INTO stock_metadata "
-            "SELECT * FROM batch_df"
-        )
+        self.conn.register("_stock_metadata_batch", batch_df)
+        try:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO stock_metadata "
+                "(symbol, stock_name, listed_date, de_listed_date, blocks) "
+                "SELECT symbol, stock_name, listed_date, de_listed_date, blocks "
+                "FROM _stock_metadata_batch"
+            )
+        finally:
+            self.conn.unregister("_stock_metadata_batch")
 
         logger.info(
             f"stock_metadata population complete: {len(rows)} records, "
@@ -1834,10 +2634,10 @@ class DuckDBWriter:
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE _halt_enriched AS
             WITH lifespans AS (
-                SELECT symbol, MIN(date) AS first_date, MAX(date) AS last_date
-                FROM stocks
-                WHERE {self._CN_STOCK_FILTER}
-                GROUP BY symbol
+                SELECT s0.symbol, MIN(s0.date) AS first_date, MAX(s0.date) AS last_date
+                FROM stocks s0
+                WHERE {self._cn_stock_filter_sql("s0.symbol")}
+                GROUP BY s0.symbol
             ),
             trade_dates AS (
                 SELECT DISTINCT date FROM stocks
@@ -1969,11 +2769,14 @@ class DuckDBWriter:
             """)
 
         # version.parquet
-        cn_filter = f"WHERE {self._CN_STOCK_FILTER}" if market == "cn" else ""
+        cn_filter = (
+            f"WHERE {self._cn_stock_filter_sql('s0.symbol')}"
+            if market == "cn" else ""
+        )
         result = self.conn.execute(f"""
             SELECT
                 (SELECT MAX(date)::VARCHAR FROM stocks) as version,
-                (SELECT COUNT(DISTINCT symbol) FROM stocks {cn_filter}) as num_stocks,
+                (SELECT COUNT(DISTINCT s0.symbol) FROM stocks s0 {cn_filter}) as num_stocks,
                 CURRENT_DATE as export_date,
                 (SELECT MIN(date)::VARCHAR FROM stocks) as start_date
         """).fetchone()
@@ -1993,10 +2796,13 @@ class DuckDBWriter:
 
     def _write_manifest(self, output_dir: Path, market: str = "cn") -> None:
         """Write manifest.json"""
-        cn_filter = f"WHERE {self._CN_STOCK_FILTER}" if market == "cn" else ""
+        cn_filter = (
+            f"WHERE {self._cn_stock_filter_sql('s0.symbol')}"
+            if market == "cn" else ""
+        )
         result = self.conn.execute(f"""
-            SELECT MIN(date), MAX(date), COUNT(DISTINCT symbol)
-            FROM stocks {cn_filter}
+            SELECT MIN(s0.date), MAX(s0.date), COUNT(DISTINCT s0.symbol)
+            FROM stocks s0 {cn_filter}
         """).fetchone()
 
         start_date = str(result[0]) if result[0] else ""
@@ -2013,5 +2819,40 @@ class DuckDBWriter:
             "export_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
+        with open(output_dir / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _write_delta_manifest(
+        self,
+        output_dir: Path,
+        base_version: str,
+        target_version: str,
+        market: str,
+        changed_tables: list[dict],
+        changed_symbols: list[str],
+        files: list[dict],
+    ) -> None:
+        manifest = {
+            "package_format": "simtradedata_delta_v1",
+            "schema_version": 1,
+            "market": market.upper(),
+            "mode": "delta",
+            "base_version": base_version,
+            "target_version": target_version,
+            "version": target_version,
+            "date_range": {"start_exclusive": base_version, "end": target_version},
+            "changed_tables": changed_tables,
+            "changed_symbols": changed_symbols,
+            "files": files,
+            "export_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
         with open(output_dir / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)

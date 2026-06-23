@@ -71,7 +71,7 @@ class ProcessLock:
         except IOError:
             print("\nError: Another download process is running")
             print(f"Lock file: {self.lock_file}")
-            print(f"\nIf no other process is running, delete the lock file:")
+            print("\nIf no other process is running, delete the lock file:")
             print(f"  rm {self.lock_file}")
             sys.exit(1)
 
@@ -233,6 +233,8 @@ class EfficientBaoStockDownloader:
                 "stock_name": basic_info.get("code_name", ""),
                 "listed_date": basic_info.get("ipoDate", ""),
                 "de_listed_date": basic_info.get("outDate", ""),
+                "security_type": basic_info.get("type", ""),
+                "listing_status": basic_info.get("status", ""),
                 "blocks": json.dumps(industry_info, ensure_ascii=False)
                 if industry_info
                 else None,

@@ -414,10 +414,14 @@ poetry run python scripts/download.py
 
 # 2. 导出为 Parquet（覆盖旧的导出）
 poetry run python scripts/export_parquet.py
+
+# 3. 可选：导出客户端增量包（供下游应用本地合并重建）
+poetry run python scripts/export_parquet.py --delta --base-version 2026-06-20 --target-version 2026-06-22
 ```
 
 第 1 步会自动检测 DuckDB 中已有数据的最新日期，只下载增量部分。
 无新交易日时全部股票秒级跳过。
+delta 导出只包含指定版本窗口内变化的 symbol 表行和 manifest；首次安装、校准和失败回退仍使用完整 Parquet 导出。
 
 ### 数据质量
 - 数据来自 BaoStock 免费数据源

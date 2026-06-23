@@ -7,6 +7,7 @@ Usage:
     poetry run python scripts/export_parquet.py                  # export CN
     poetry run python scripts/export_parquet.py --market us      # export US
     poetry run python scripts/export_parquet.py --market us --output /custom/path
+    poetry run python scripts/export_parquet.py --delta --base-version 2026-06-20
 """
 
 import argparse
@@ -55,8 +56,7 @@ def export_to_parquet(db_path: str, output_dir: str, market: str = "cn") -> None
     print("=" * 70)
 
     if not Path(db_path).exists():
-        print(f"\nError: Database not found: {db_path}")
-        return
+        raise SystemExit(f"Error: Database not found: {db_path}")
 
     writer = DuckDBWriter(db_path=db_path)
     try:
@@ -87,6 +87,38 @@ def export_to_parquet(db_path: str, output_dir: str, market: str = "cn") -> None
         writer.close()
 
 
+def export_delta(
+    db_path: str,
+    output_dir: str,
+    base_version: str,
+    target_version: str | None = None,
+    market: str = "cn",
+) -> None:
+    print("=" * 70)
+    print(f"SimTradeData Delta Export  [{market.upper()}]")
+    print("=" * 70)
+    print(f"  DB:      {db_path}")
+    print(f"  Output:  {output_dir}")
+    print(f"  Base:    {base_version}")
+    print(f"  Target:  {target_version or 'latest'}")
+    print("=" * 70)
+
+    if not Path(db_path).exists():
+        raise SystemExit(f"Error: Database not found: {db_path}")
+
+    writer = DuckDBWriter(db_path=db_path)
+    try:
+        writer.export_delta(
+            output_dir,
+            base_version=base_version,
+            target_version=target_version,
+            market=market,
+        )
+        print(f"\nDone! -> {output_dir}")
+    finally:
+        writer.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export DuckDB to Parquet")
     parser.add_argument(
@@ -101,12 +133,39 @@ def main():
         "--db", type=str, default=None,
         help="Override DuckDB path (default: auto by market)",
     )
+    parser.add_argument(
+        "--delta", action="store_true",
+        help="Export a delta package instead of a full PTrade parquet tree",
+    )
+    parser.add_argument(
+        "--base-version", type=str, default=None,
+        help="Base version for delta export, exclusive (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--target-version", type=str, default=None,
+        help="Target version for delta export, inclusive (default: latest stock date)",
+    )
     args = parser.parse_args()
+
+    if args.delta and not args.base_version:
+        parser.error("--base-version is required when --delta is used")
+    if not args.delta and args.target_version:
+        parser.error("--target-version can only be used with --delta")
 
     db_path = args.db or _resolve_db(args.market)
     output_dir = args.output or f"data/export/{args.market}"
 
-    export_to_parquet(db_path, output_dir, market=args.market)
+    if args.delta:
+        output_dir = args.output or f"data/export/{args.market}-delta"
+        export_delta(
+            db_path,
+            output_dir,
+            base_version=args.base_version,
+            target_version=args.target_version,
+            market=args.market,
+        )
+    else:
+        export_to_parquet(db_path, output_dir, market=args.market)
 
 
 if __name__ == "__main__":
