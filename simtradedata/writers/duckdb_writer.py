@@ -2811,6 +2811,7 @@ class DuckDBWriter:
 
         manifest = {
             "version": end_date,
+            "market": market.upper(),
             "date_range": {
                 "start": start_date,
                 "end": end_date,
