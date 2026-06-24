@@ -1062,26 +1062,43 @@ class DuckDBWriter:
     # Derived fields
     # ========================================
 
-    def compute_derived_fundamentals(self) -> None:
+    def compute_derived_fundamentals(self, symbols: list[str] | None = None) -> None:
         """
         Fill roa, roe_ttm, roa_ttm from existing fundamentals data.
 
         - roa = roe / (1 + debt_equity_ratio)
         - roe_ttm = rolling 4-quarter average of roe
         - roa_ttm = rolling 4-quarter average of roa
+
+        When symbols is provided, only compute for those symbols (used by
+        delta exports to avoid full-table window function recomputation).
         """
+        symbol_filter = ""
+        sub_where = "WHERE roe IS NOT NULL OR roa IS NOT NULL"
+        if symbols:
+            symbols_clause = self._symbols_in_clause(symbols)
+            symbol_filter = f"AND symbol IN ({symbols_clause})"
+            sub_where = f"WHERE fundamentals.symbol IN ({symbols_clause}) AND (roe IS NOT NULL OR roa IS NOT NULL)"
+
         # roa = roe / (1 + debt_equity_ratio)
-        self.conn.execute("""
+        self.conn.execute(f"""
             UPDATE fundamentals
             SET roa = roe / (1 + debt_equity_ratio)
             WHERE roe IS NOT NULL
               AND debt_equity_ratio IS NOT NULL
               AND debt_equity_ratio != -1
               AND roa IS NULL
+              {symbol_filter}
         """)
 
-        # roe_ttm / roa_ttm = rolling 4-quarter average
-        self.conn.execute("""
+        # roe_ttm / roa_ttm = rolling 4-quarter average.
+        # The outer UPDATE aliases fundamentals as "f", so the symbol
+        # filter must reference "f.symbol" rather than "symbol".
+        outer_symbol_filter = ""
+        if symbols:
+            outer_symbol_filter = f"AND f.symbol IN ({symbols_clause})"
+
+        self.conn.execute(f"""
             UPDATE fundamentals f
             SET
                 roe_ttm = sub.roe_ttm,
@@ -1092,7 +1109,7 @@ class DuckDBWriter:
                     AVG(roe) OVER w AS roe_ttm,
                     AVG(roa) OVER w AS roa_ttm
                 FROM fundamentals
-                WHERE roe IS NOT NULL OR roa IS NOT NULL
+                {sub_where}
                 WINDOW w AS (
                     PARTITION BY symbol
                     ORDER BY date
@@ -1102,14 +1119,17 @@ class DuckDBWriter:
             WHERE f.symbol = sub.symbol
               AND f.date = sub.date
               AND f.roe_ttm IS NULL
+              {outer_symbol_filter}
         """)
 
-        updated = self.conn.execute("""
+        count_filter = f"WHERE symbol IN ({symbols_clause})" if symbols else ""
+        updated = self.conn.execute(f"""
             SELECT
                 SUM(CASE WHEN roa IS NOT NULL THEN 1 ELSE 0 END),
                 SUM(CASE WHEN roe_ttm IS NOT NULL THEN 1 ELSE 0 END),
                 SUM(CASE WHEN roa_ttm IS NOT NULL THEN 1 ELSE 0 END)
             FROM fundamentals
+            {count_filter}
         """).fetchone()
         updated = tuple(value or 0 for value in updated)
         logger.info(
@@ -1176,7 +1196,24 @@ class DuckDBWriter:
         if target_version <= base_version:
             raise ValueError("target_version must be newer than base_version")
 
-        self.compute_derived_fundamentals()
+        # Only recompute derived fundamentals for symbols that changed,
+        # avoiding a full-table window function scan for every delta export.
+        fund_symbols = [r[0] for r in self.conn.execute("""
+            SELECT DISTINCT symbol FROM (
+                SELECT symbol
+                FROM data_change_log
+                WHERE table_name = 'fundamentals'
+                  AND symbol IS NOT NULL AND date IS NOT NULL
+                  AND date <= ?::DATE
+                  AND (date > ?::DATE OR changed_at::DATE > ?::DATE)
+                UNION
+                SELECT DISTINCT symbol
+                FROM fundamentals
+                WHERE date > ?::DATE AND date <= ?::DATE
+            ) changed
+            ORDER BY symbol
+        """, [target_version, base_version, base_version, base_version, target_version]).fetchall()]
+        self.compute_derived_fundamentals(symbols=fund_symbols or None)
 
         tables = ["stocks", "valuation", "fundamentals", "exrights"]
         changed_tables = []
@@ -1187,7 +1224,8 @@ class DuckDBWriter:
             table_dir = output_path / table
             table_dir.mkdir(parents=True, exist_ok=True)
             rows, symbols = self._export_delta_table(
-                table, table_dir, base_version, target_version, market=market
+                table, table_dir, base_version, target_version, market=market,
+                changed_symbols=fund_symbols if table == "fundamentals" else None,
             )
             if rows == 0:
                 table_dir.rmdir()
@@ -1288,6 +1326,41 @@ class DuckDBWriter:
         finally:
             self.conn.unregister("_symbol_filter_candidates")
 
+    @staticmethod
+    def _symbols_in_clause(symbols: list[str]) -> str:
+        """Return a SQL-safe comma-separated IN clause from a symbol list."""
+        escaped = [s.replace("'", "''") for s in symbols]
+        return ", ".join(f"'{s}'" for s in escaped)
+
+    @staticmethod
+    def _delta_changed_cte_inner(
+        table_name: str, base_version: str, target_version: str
+    ) -> tuple[str, list]:
+        """Return (inner_sql, params) selecting symbols changed between versions.
+
+        The returned SQL is a ``SELECT DISTINCT symbol FROM (...)`` subquery
+        suitable for embedding inside a CTE definition.  Callers append the
+        returned params to their own parameter list when executing.
+
+        Uses ``?::DATE`` positional placeholders — params are
+        ``[target_version, base_version, base_version, base_version, target_version]``.
+        """
+        sql = f"""
+            SELECT DISTINCT symbol FROM (
+                SELECT symbol
+                FROM data_change_log
+                WHERE table_name = '{table_name}'
+                  AND symbol IS NOT NULL AND date IS NOT NULL
+                  AND date <= ?::DATE
+                  AND (date > ?::DATE OR changed_at::DATE > ?::DATE)
+                UNION
+                SELECT DISTINCT symbol
+                FROM {table_name}
+                WHERE date > ?::DATE AND date <= ?::DATE
+            ) changed"""
+        params = [target_version, base_version, base_version, base_version, target_version]
+        return sql, params
+
     def _export_delta_table(
         self,
         table: str,
@@ -1295,6 +1368,7 @@ class DuckDBWriter:
         base_version: str,
         target_version: str,
         market: str = "cn",
+        changed_symbols: list[str] | None = None,
     ) -> tuple[int, list[str]]:
         """Export one symbol-keyed table as per-symbol delta parquet files."""
         if table == "stocks":
@@ -1303,7 +1377,8 @@ class DuckDBWriter:
             )
         if table == "fundamentals":
             return self._export_delta_fundamentals_table(
-                output_dir, base_version, target_version, market=market
+                output_dir, base_version, target_version, market=market,
+                changed_symbols=changed_symbols,
             )
         if table == "valuation":
             return self._export_delta_valuation_table(
@@ -1349,15 +1424,6 @@ class DuckDBWriter:
             base_version,
             target_version,
         ])
-        rows = self.conn.execute(f"""
-            SELECT COUNT(*)
-            FROM {temp_table} t
-            JOIN {ranges_table} r ON r.symbol = t.symbol
-            WHERE t.date >= r.min_date AND t.date <= ?::DATE
-        """, [target_version]).fetchone()[0]
-        if rows == 0:
-            return 0, []
-
         symbols = [r[0] for r in self.conn.execute(f"""
             SELECT DISTINCT t.symbol
             FROM {temp_table} t
@@ -1365,6 +1431,9 @@ class DuckDBWriter:
             WHERE t.date >= r.min_date AND t.date <= ?::DATE
             ORDER BY t.symbol
         """, [target_version]).fetchall()]
+
+        if not symbols:
+            return 0, []
 
         for symbol in symbols:
             symbol_escaped = symbol.replace("'", "''")
@@ -1380,7 +1449,14 @@ class DuckDBWriter:
                 ) TO '{output_file}' (FORMAT PARQUET, CODEC 'ZSTD')
             """, [target_version])
 
-        return rows, symbols
+        total_rows = self.conn.execute(f"""
+            SELECT COUNT(*)
+            FROM {temp_table} t
+            JOIN {ranges_table} r ON r.symbol = t.symbol
+            WHERE t.date >= r.min_date AND t.date <= ?::DATE
+        """, [target_version]).fetchone()[0]
+
+        return total_rows, symbols
 
     def _export_delta_stocks_table(
         self,
@@ -1389,7 +1465,20 @@ class DuckDBWriter:
         target_version: str,
         market: str = "cn",
     ) -> tuple[int, list[str]]:
-        cn_filter = f"WHERE {self._cn_stock_filter_sql('stocks.symbol')}" if market == "cn" else ""
+        # Determine changed stock symbols so we only gap-fill those,
+        # not all ~5000 stocks. Two sources: change_log (modified) and
+        # direct stocks query (new symbols without log entries).
+        cn_cond = self._cn_stock_filter_sql('stocks.symbol') if market == "cn" else ""
+        changed_cte, changed_params = self._delta_changed_cte_inner(
+            "stocks", base_version, target_version
+        )
+
+        # Build lifespans WHERE clause: changed symbols + optional CN filter
+        lifespan_filters = ["symbol IN (SELECT symbol FROM changed_symbols)"]
+        if cn_cond:
+            lifespan_filters.append(cn_cond)
+        lifespan_where = "WHERE " + " AND ".join(lifespan_filters)
+
         if market == "us":
             high_limit_sql = "CAST(NULL AS DOUBLE) AS high_limit"
             low_limit_sql = "CAST(NULL AS DOUBLE) AS low_limit"
@@ -1416,9 +1505,14 @@ class DuckDBWriter:
                 UNION
                 SELECT date FROM trade_days
             ),
+            changed_symbols AS (
+                {changed_cte}
+            ),
             lifespans AS (
                 SELECT symbol, MIN(date) AS first_date, MAX(date) AS last_date
-                FROM stocks {cn_filter} GROUP BY symbol
+                FROM stocks
+                {lifespan_where}
+                GROUP BY symbol
             ),
             joined AS (
                 SELECT
@@ -1502,7 +1596,7 @@ class DuckDBWriter:
                 {low_limit_sql},
                 preclose, volume, money
             FROM filled
-        """)
+        """, changed_params)
         try:
             return self._copy_delta_symbol_temp_table(
                 "stocks", "_delta_stocks_export", output_dir, base_version, target_version
@@ -1516,10 +1610,26 @@ class DuckDBWriter:
         base_version: str,
         target_version: str,
         market: str = "cn",
+        changed_symbols: list[str] | None = None,
     ) -> tuple[int, list[str]]:
-        cn_filter = f"WHERE {self._cn_stock_filter_sql('fundamentals.symbol')}" if market == "cn" else ""
+        # When changed_symbols is provided (pre-computed by export_delta),
+        # skip the data_change_log query and use the list directly.
+        if changed_symbols:
+            cte_sql = "SELECT unnest(?::VARCHAR[]) AS symbol"
+            cte_params = [changed_symbols]
+        else:
+            cte_sql, cte_params = self._delta_changed_cte_inner(
+                "fundamentals", base_version, target_version
+            )
+        cn_filter = (
+            f"AND {self._cn_stock_filter_sql('fundamentals.symbol')}"
+            if market == "cn" else ""
+        )
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE _delta_fundamentals_export AS
+            WITH changed_symbols AS (
+                {cte_sql}
+            )
             SELECT
                 symbol,
                 date::TIMESTAMP_NS AS date, publ_date,
@@ -1542,8 +1652,9 @@ class DuckDBWriter:
                 interest_cover, roic, roa_ebit_ttm,
                 total_shares, a_floats
             FROM fundamentals
+            WHERE symbol IN (SELECT symbol FROM changed_symbols)
             {cn_filter}
-        """)
+        """, cte_params)
         try:
             return self._copy_delta_symbol_temp_table(
                 "fundamentals", "_delta_fundamentals_export", output_dir, base_version, target_version
@@ -1558,12 +1669,19 @@ class DuckDBWriter:
         target_version: str,
         market: str = "cn",
     ) -> tuple[int, list[str]]:
+        # Only process valuation rows for symbols that actually changed.
+        changed_cte, changed_params = self._delta_changed_cte_inner(
+            "valuation", base_version, target_version
+        )
         cn_filter = (
-            f"WHERE {self._cn_stock_filter_sql('v.symbol')}"
+            f"AND {self._cn_stock_filter_sql('v.symbol')}"
             if market == "cn" else ""
         )
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE _delta_valuation_export AS
+            WITH changed_val_symbols AS (
+                {changed_cte}
+            )
             SELECT
                 v.symbol,
                 v.date::TIMESTAMP_NS AS date,
@@ -1585,8 +1703,9 @@ class DuckDBWriter:
                 WHERE f2.symbol = v.symbol AND f2.date <= v.date
                 ORDER BY f2.date DESC LIMIT 1
             ) f ON TRUE
+            WHERE v.symbol IN (SELECT symbol FROM changed_val_symbols)
             {cn_filter}
-        """)
+        """, changed_params)
         try:
             return self._copy_delta_symbol_temp_table(
                 "valuation", "_delta_valuation_export", output_dir, base_version, target_version
