@@ -26,12 +26,12 @@ from pathlib import Path
 # Suppress FutureWarning from mootdx using deprecated pandas fillna(method=...)
 warnings.filterwarnings("ignore", category=FutureWarning, module="mootdx")
 
-import pandas as pd
-from tqdm import tqdm
+import pandas as pd  # noqa: E402
+from tqdm import tqdm  # noqa: E402
 
-from simtradedata.config.field_mappings import BENCHMARK_CONFIG
-from simtradedata.fetchers.mootdx_unified_fetcher import MootdxUnifiedFetcher
-from simtradedata.writers.duckdb_writer import DEFAULT_DB_PATH, DuckDBWriter
+from simtradedata.config.field_mappings import BENCHMARK_CONFIG  # noqa: E402
+from simtradedata.fetchers.mootdx_unified_fetcher import MootdxUnifiedFetcher  # noqa: E402
+from simtradedata.writers.duckdb_writer import DEFAULT_DB_PATH, DuckDBWriter  # noqa: E402
 
 # Configuration
 OUTPUT_DIR = "data"
@@ -78,7 +78,7 @@ class ProcessLock:
         except IOError:
             print("\nError: Another mootdx download process is running")
             print(f"Lock file: {self.lock_file}")
-            print(f"\nIf no other process is running, delete the lock file:")
+            print("\nIf no other process is running, delete the lock file:")
             print(f"  rm {self.lock_file}")
             sys.exit(1)
 

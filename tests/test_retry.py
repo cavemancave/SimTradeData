@@ -4,7 +4,6 @@ import pytest
 
 from simtradedata.resilience.retry import (
     RetryConfig,
-    _calculate_delay,
     is_retryable,
     retry,
 )

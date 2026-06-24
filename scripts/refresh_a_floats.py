@@ -7,7 +7,6 @@ the fundamentals table.
 """
 
 import time
-from pathlib import Path
 
 from simtradedata.fetchers.mootdx_affair_fetcher import MootdxAffairFetcher
 from simtradedata.utils.code_utils import convert_to_ptrade_code

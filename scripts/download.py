@@ -14,12 +14,12 @@ import argparse
 import sys
 from pathlib import Path
 
+from simtradedata.writers.duckdb_writer import DEFAULT_DB_PATH, DuckDBWriter
+
 # Add scripts directory to path for importing sibling scripts
 _scripts_dir = str(Path(__file__).parent)
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
-
-from simtradedata.writers.duckdb_writer import DEFAULT_DB_PATH, DuckDBWriter
 
 
 def print_data_status(db_path: str = DEFAULT_DB_PATH) -> None:

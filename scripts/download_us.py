@@ -70,7 +70,7 @@ class ProcessLock:
         except IOError:
             print("\nError: Another US download process is running")
             print(f"Lock file: {self.lock_file}")
-            print(f"\nIf no other process is running, delete the lock file:")
+            print("\nIf no other process is running, delete the lock file:")
             print(f"  rm {self.lock_file}")
             sys.exit(1)
 

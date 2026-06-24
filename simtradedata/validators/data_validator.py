@@ -6,9 +6,7 @@ field completeness, and value ranges before persisting data.
 """
 
 import logging
-from typing import List, Optional
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)

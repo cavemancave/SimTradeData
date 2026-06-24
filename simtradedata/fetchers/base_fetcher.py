@@ -174,6 +174,6 @@ class BaseFetcher(ABC):
         """Destructor - ensure cleanup on object deletion"""
         try:
             self.logout()
-        except:
+        except Exception:
             # Ignore all errors in destructor
             pass

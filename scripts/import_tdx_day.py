@@ -28,16 +28,14 @@ Usage:
 import argparse
 import logging
 import struct
-import tempfile
 import zipfile
-from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Tuple
 
 import pandas as pd
 from tqdm import tqdm
 
-from simtradedata.utils.code_utils import convert_to_ptrade_code, is_etf_code
+from simtradedata.utils.code_utils import is_etf_code
 from simtradedata.writers.duckdb_writer import DEFAULT_DB_PATH, DuckDBWriter
 
 # Configuration

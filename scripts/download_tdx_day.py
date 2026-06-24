@@ -241,7 +241,7 @@ Examples:
         else:
             print()
             print("Local file is up to date, skipping download.")
-            print(f"  (Use --force-download to re-download)")
+            print("  (Use --force-download to re-download)")
 
     if args.download_only:
         print()
