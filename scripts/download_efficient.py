@@ -154,15 +154,22 @@ class EfficientBaoStockDownloader:
 
             # In valuation-only mode, skip market data and related downloads
             if self.valuation_only:
+                updated = False
+
                 # Write valuation data
                 valuation_data = split_data.get("valuation")
                 if valuation_data is not None and not valuation_data.empty:
                     self.writer.write_valuation(symbol, valuation_data)
+                    updated = True
 
                 # Cache status data
-                if "status" in split_data:
-                    self.status_cache[symbol] = split_data["status"]
+                status_data = split_data.get("status")
+                if status_data is not None and not status_data.empty:
+                    self.status_cache[symbol] = status_data
+                    updated = True
 
+                if updated:
+                    return {"stock_code": symbol}
                 return None
 
             # Full mode: write market data
