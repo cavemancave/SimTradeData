@@ -16,8 +16,9 @@
 #   LOCK_FILE           Path to lock file (default: /tmp/simtradedata_daily.lock)
 #   LOG_DIR             Directory for run logs (default: logs/daily)
 #   LOG_RETENTION_DAYS  Days to keep logs (default: 30)
-#   DOWNLOAD_ATTEMPTS   Download attempts before giving up/no-op (default: 4)
+#   DOWNLOAD_ATTEMPTS   Download attempts before giving up/no-op (default: 1)
 #   RETRY_INTERVAL_SECONDS Seconds between download retries (default: 1800)
+#   INTEGRITY_STRICT    Run integrity gates before/after release (default: 1)
 
 set -euo pipefail
 
@@ -32,8 +33,9 @@ ALERT_WEBHOOK_URL="${ALERT_WEBHOOK_URL:-}"
 LOCK_FILE="${LOCK_FILE:-/tmp/simtradedata_daily_${MARKET}.lock}"
 LOG_DIR="${LOG_DIR:-$SIMTRADE_DATA_DIR/logs/daily}"
 LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
-DOWNLOAD_ATTEMPTS="${DOWNLOAD_ATTEMPTS:-4}"
+DOWNLOAD_ATTEMPTS="${DOWNLOAD_ATTEMPTS:-1}"
 RETRY_INTERVAL_SECONDS="${RETRY_INTERVAL_SECONDS:-1800}"
+INTEGRITY_STRICT="${INTEGRITY_STRICT:-1}"
 
 if [[ "$MARKET" != "cn" && "$MARKET" != "us" ]]; then
   echo "ERROR: MARKET must be cn or us"
@@ -49,6 +51,13 @@ if ! [[ "$RETRY_INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
   echo "ERROR: RETRY_INTERVAL_SECONDS must be a non-negative integer"
   exit 1
 fi
+
+if [[ "$INTEGRITY_STRICT" != "0" && "$INTEGRITY_STRICT" != "1" ]]; then
+  echo "ERROR: INTEGRITY_STRICT must be 0 or 1"
+  exit 1
+fi
+
+DUCKDB_FILE="$SIMTRADE_DATA_DIR/data/${MARKET}.duckdb"
 
 # ── Acquire single-instance lock ────────────────────────────────────
 exec 200>"$LOCK_FILE"
@@ -119,6 +128,7 @@ log "  Data dir:        $SIMTRADE_DATA_DIR"
 log "  Log file:        $LOG_FILE"
 log "  Download tries:  $DOWNLOAD_ATTEMPTS"
 log "  Retry interval:  ${RETRY_INTERVAL_SECONDS}s"
+log "  Integrity gate:  $INTEGRITY_STRICT"
 
 cd "$SIMTRADE_DATA_DIR"
 
@@ -177,7 +187,24 @@ fi
 
 log "New data detected: ${OLD_VERSION:-none} → $NEW_VERSION"
 
-# 4. Run release pipeline (export + package + publish)
+# 4. Pre-release integrity gate: DB must be complete before exporting.
+if [[ "$INTEGRITY_STRICT" == "1" ]]; then
+  INTEGRITY_REPORT="$LOG_DIR/$(date +%Y%m%d_%H%M%S)_${MARKET}_pre_release_integrity.json"
+  log "--- Running pre-release integrity gate ---"
+  if ! poetry run python scripts/check_integrity.py \
+    --db-path "$DUCKDB_FILE" \
+    --market "$MARKET" \
+    --target-date "$NEW_VERSION" \
+    --json-output "$INTEGRITY_REPORT" \
+    --strict; then
+    alert "pre-release integrity gate failed (report: $INTEGRITY_REPORT)"
+    cleanup_logs
+    exit 1
+  fi
+  log "Pre-release integrity verified: $INTEGRITY_REPORT"
+fi
+
+# 5. Run release pipeline (export + package + publish)
 log "--- Running release_data.sh ---"
 RELEASE_ARGS="--market $MARKET --publish-targets $PUBLISH_TARGETS"
 if [[ "$PUBLISH_TARGETS" == "cos" || "$PUBLISH_TARGETS" == "all" ]]; then
@@ -192,7 +219,7 @@ if ! bash scripts/release_data.sh $RELEASE_ARGS; then
   exit 1
 fi
 
-# 5. Freshness gate: verify exported manifest version matches DB
+# 6. Freshness gate: verify exported manifest version matches DB
 MANIFEST_FILE="$SIMTRADE_DATA_DIR/data/export/$MARKET/manifest.json"
 if [[ -f "$MANIFEST_FILE" ]]; then
   MANIFEST_VERSION=$(python3 -c "import json; print(json.load(open('$MANIFEST_FILE')).get('version',''))")
@@ -206,6 +233,23 @@ else
   alert "Manifest missing: $MANIFEST_FILE"
   cleanup_logs
   exit 1
+fi
+
+if [[ "$INTEGRITY_STRICT" == "1" ]]; then
+  INTEGRITY_REPORT="$LOG_DIR/$(date +%Y%m%d_%H%M%S)_${MARKET}_post_release_integrity.json"
+  log "--- Running post-release integrity gate ---"
+  if ! poetry run python scripts/check_integrity.py \
+    --db-path "$DUCKDB_FILE" \
+    --market "$MARKET" \
+    --target-date "$NEW_VERSION" \
+    --export-dir "$SIMTRADE_DATA_DIR/data/export/$MARKET" \
+    --json-output "$INTEGRITY_REPORT" \
+    --strict; then
+    alert "post-release integrity gate failed (report: $INTEGRITY_REPORT)"
+    cleanup_logs
+    exit 1
+  fi
+  log "Post-release integrity verified: $INTEGRITY_REPORT"
 fi
 
 log "=== Pipeline Complete (published $NEW_VERSION) ==="

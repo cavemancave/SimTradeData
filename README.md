@@ -428,11 +428,13 @@ poetry run python scripts/export_parquet.py --delta --base-version 2026-06-20 --
 Step 1 automatically detects the latest date of existing data in DuckDB and only downloads the delta. When there are no new trading days, all stocks are skipped in seconds.
 Delta export contains changed symbol-table rows and a manifest for the requested version window. First install, periodic reconciliation, and failed delta recovery still use the full Parquet export.
 
-For production scheduling, run the daily script later in the trading day (for example after 21:30). It retries both download failures and successful runs that have not advanced the data version yet:
+For production scheduling, run the daily script later in the trading day (for example after 22:30). The default is one download attempt plus pre/post release integrity gates, so transient upstream delays do not trigger repeated requests automatically:
 
 ```bash
-DOWNLOAD_ATTEMPTS=4 RETRY_INTERVAL_SECONDS=1800 bash scripts/run_daily.sh
+DOWNLOAD_ATTEMPTS=1 INTEGRITY_STRICT=1 bash scripts/run_daily.sh
 ```
+
+The integrity gate verifies that active stocks have latest market and valuation data, validates the exported manifest, and writes JSON reports under `logs/daily/`. If a source is late, let the scheduler run again later instead of looping retries.
 
 ### Data Quality
 - Data sourced from BaoStock free data service

@@ -1,200 +1,577 @@
 # -*- coding: utf-8 -*-
-"""
-Data integrity checker for SimTradeData DuckDB database
+"""Data integrity gate for SimTradeData DuckDB and exported Parquet files."""
 
-Reports coverage gaps across all tables and identifies stocks
-that need re-downloading due to interrupted downloads.
-
-Usage:
-    poetry run python scripts/check_integrity.py
-    poetry run python scripts/check_integrity.py --fix   # re-download missing data
-"""
+from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 
 from simtradedata.utils.paths import DUCKDB_PATH
 
 DB_PATH = str(DUCKDB_PATH)
+CN_FALLBACK_PREFIXES = {
+    "000",
+    "001",
+    "002",
+    "003",
+    "300",
+    "301",
+    "302",
+    "600",
+    "601",
+    "603",
+    "605",
+    "688",
+    "689",
+}
+CN_STANDARD_PREFIXES = CN_FALLBACK_PREFIXES - {"302"}
 
 
-def get_a_share_filter(col: str = "symbol") -> str:
-    """SQL filter for A-share stocks only"""
+def _json_default(value: Any) -> str:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
+
+
+def _date_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)[:10]
+
+
+def _is_cn_symbol(symbol: str) -> bool:
+    if not isinstance(symbol, str) or "." not in symbol:
+        return False
+    code, suffix = symbol.split(".", 1)
+    return len(code) == 6 and suffix in {"SZ", "SS"} and code[:3] in CN_FALLBACK_PREFIXES
+
+
+def _has_standard_cn_prefix(symbol: str) -> bool:
+    code = symbol.split(".", 1)[0] if isinstance(symbol, str) else ""
+    return len(code) == 6 and code[:3] in CN_STANDARD_PREFIXES
+
+
+def _is_active(de_listed_date: Any, target_date: str) -> bool:
+    text = _date_text(de_listed_date)
+    if not text or text.lower() in {"none", "null", "nat"}:
+        return True
+    return text > target_date
+
+
+def _table_exists(conn: duckdb.DuckDBPyConnection, table: str) -> bool:
     return (
-        f"(({col} LIKE '6%' AND {col} LIKE '%.SS') OR "
-        f"({col} LIKE '0%' AND {col} LIKE '%.SZ') OR "
-        f"({col} LIKE '3%' AND {col} LIKE '%.SZ'))"
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema='main' AND table_name=?
+            """,
+            [table],
+        ).fetchone()[0]
+        > 0
     )
 
 
-def check_integrity(db_path: str = DB_PATH) -> dict:
-    """
-    Check data integrity and return a summary report.
-
-    Returns:
-        dict with keys: tables, pool_size, coverage, missing_stocks
-    """
-    if not Path(db_path).exists():
-        print(f"Database not found: {db_path}")
-        sys.exit(1)
-
-    conn = duckdb.connect(db_path, read_only=True)
-    report = {}
-
-    # --- Table summary ---
-    tables = conn.execute(
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema='main' ORDER BY table_name"
+def _table_columns(conn: duckdb.DuckDBPyConnection, table: str) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='main' AND table_name=?
+        """,
+        [table],
     ).fetchall()
+    return {row[0] for row in rows}
 
-    print("=" * 70)
-    print("SimTradeData Integrity Report")
-    print("=" * 70)
 
-    print("\n--- Table Row Counts ---")
-    table_info = {}
-    for (name,) in tables:
-        count = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
-        table_info[name] = count
-        print(f"  {name:30s} {count:>12,} rows")
-    report["tables"] = table_info
-
-    # --- Stock pool ---
-    pool_stocks = set(
-        r[0] for r in conn.execute(
-            f"SELECT DISTINCT symbol FROM stock_pool WHERE {get_a_share_filter()}"
-        ).fetchall()
-    )
-    print(f"\n--- A-Share Stock Pool: {len(pool_stocks):,} stocks ---")
-    report["pool_size"] = len(pool_stocks)
-
-    # --- Per-table coverage ---
-    print("\n--- Coverage vs Stock Pool ---")
-    coverage = {}
-    data_tables = ["stocks", "valuation", "exrights"]
-    for table in data_tables:
-        if table not in table_info:
-            continue
-        existing = set(
-            r[0] for r in conn.execute(
-                f"SELECT DISTINCT symbol FROM {table} WHERE {get_a_share_filter()}"
-            ).fetchall()
-        )
-        missing = pool_stocks - existing
-        pct = len(existing) / len(pool_stocks) * 100 if pool_stocks else 0
-        coverage[table] = {
-            "existing": len(existing),
-            "missing": len(missing),
-            "pct": pct,
-        }
-        status = "OK" if pct > 95 else "LOW" if pct > 50 else "CRITICAL"
-        print(
-            f"  {table:20s} {len(existing):>5,} / {len(pool_stocks):>5,} "
-            f"({pct:5.1f}%)  [{status}]"
-        )
-    report["coverage"] = coverage
-
-    # --- Date range per table ---
-    print("\n--- Date Ranges ---")
-    for table in data_tables:
-        if table not in table_info or table_info[table] == 0:
-            continue
-        min_d = conn.execute(f"SELECT MIN(date) FROM {table}").fetchone()[0]
-        max_d = conn.execute(f"SELECT MAX(date) FROM {table}").fetchone()[0]
-        print(f"  {table:20s} {min_d} ~ {max_d}")
-
-    # --- Missing stocks detail ---
-    print("\n--- Missing Stocks (valuation table) ---")
-    val_existing = set(
-        r[0] for r in conn.execute(
-            f"SELECT DISTINCT symbol FROM valuation WHERE {get_a_share_filter()}"
-        ).fetchall()
-    )
-    val_missing = sorted(pool_stocks - val_existing)
-    report["missing_stocks"] = {
-        "valuation": val_missing,
+def _table_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    tables = conn.execute(
+        """
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema='main'
+        ORDER BY table_name
+        """
+    ).fetchall()
+    return {
+        name: conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+        for (name,) in tables
     }
 
-    if val_missing:
-        print(f"  {len(val_missing):,} A-share stocks missing valuation data")
-        # Show first/last few
-        show = val_missing[:5]
-        if len(val_missing) > 10:
-            show += ["..."]
-            show += val_missing[-5:]
-        print(f"  Examples: {', '.join(show)}")
-    else:
-        print("  All stocks have valuation data")
 
-    # --- Stale data detection ---
-    print("\n--- Stale Data (valuation not up to latest trading day) ---")
-    latest_val_date = conn.execute("SELECT MAX(date) FROM valuation").fetchone()[0]
-    if latest_val_date:
-        stale = conn.execute(
+def _latest_date(
+    conn: duckdb.DuckDBPyConnection,
+    table: str,
+    symbol: str | None = None,
+) -> str | None:
+    if not _table_exists(conn, table):
+        return None
+    if symbol is None:
+        row = conn.execute(f"SELECT MAX(date) FROM {table}").fetchone()
+    else:
+        row = conn.execute(
+            f"SELECT MAX(date) FROM {table} WHERE symbol=?",
+            [symbol],
+        ).fetchone()
+    return _date_text(row[0]) if row else None
+
+
+def _active_cn_symbols(
+    conn: duckdb.DuckDBPyConnection,
+    target_date: str,
+) -> tuple[list[str], list[str]]:
+    """Return active CN stock symbols and non-standard active symbols."""
+    if _table_exists(conn, "stock_metadata"):
+        metadata_columns = _table_columns(conn, "stock_metadata")
+        security_type_expr = (
+            "security_type" if "security_type" in metadata_columns else "NULL"
+        )
+        rows = conn.execute(
             f"""
-            SELECT COUNT(DISTINCT symbol) FROM valuation
-            WHERE {get_a_share_filter()}
-            GROUP BY symbol
-            HAVING MAX(date) < '{latest_val_date}'
+            SELECT symbol, de_listed_date, {security_type_expr} AS security_type
+            FROM stock_metadata
+            ORDER BY symbol
             """
         ).fetchall()
-        stale_count = len(stale)
-        print(f"  Latest valuation date: {latest_val_date}")
-        print(f"  Stocks not at latest date: {stale_count:,}")
-    else:
-        print("  No valuation data")
+        has_security_type = any(row[2] not in (None, "") for row in rows)
 
-    # --- Fundamentals progress ---
-    if "fundamentals_progress" in table_info:
-        print("\n--- Fundamentals Progress ---")
-        completed = conn.execute(
-            "SELECT year, quarter, stock_count FROM fundamentals_progress "
-            "ORDER BY year, quarter"
+        symbols = []
+        anomalies = []
+        for symbol, de_listed_date, security_type in rows:
+            if not _is_active(de_listed_date, target_date):
+                continue
+            if has_security_type:
+                if security_type != "1":
+                    continue
+                if not isinstance(symbol, str) or not symbol.endswith((".SZ", ".SS")):
+                    continue
+            elif not _is_cn_symbol(symbol):
+                continue
+
+            symbols.append(symbol)
+            if not _has_standard_cn_prefix(symbol):
+                anomalies.append(symbol)
+        return sorted(set(symbols)), sorted(set(anomalies))
+
+    rows = conn.execute("SELECT DISTINCT symbol FROM stocks ORDER BY symbol").fetchall()
+    symbols = [row[0] for row in rows if _is_cn_symbol(row[0])]
+    anomalies = [symbol for symbol in symbols if not _has_standard_cn_prefix(symbol)]
+    return sorted(set(symbols)), sorted(set(anomalies))
+
+
+def _stock_universe(
+    conn: duckdb.DuckDBPyConnection,
+    market: str,
+    target_date: str,
+) -> tuple[list[str], list[str]]:
+    if market == "cn":
+        return _active_cn_symbols(conn, target_date)
+
+    rows = conn.execute("SELECT DISTINCT symbol FROM stocks ORDER BY symbol").fetchall()
+    return [row[0] for row in rows], []
+
+
+def _symbols_latest_status(
+    conn: duckdb.DuckDBPyConnection,
+    table: str,
+    symbols: list[str],
+    target_date: str,
+) -> dict[str, Any]:
+    if not symbols or not _table_exists(conn, table):
+        return {
+            "latest_count": 0,
+            "missing": symbols,
+            "stale": [],
+        }
+
+    latest_by_symbol = {
+        symbol: _date_text(max_date)
+        for symbol, max_date in conn.execute(
+            f"""
+            SELECT symbol, MAX(date) FROM {table}
+            WHERE symbol IN ({",".join(["?"] * len(symbols))})
+            GROUP BY symbol
+            """,
+            symbols,
         ).fetchall()
-        if completed:
-            print(f"  Completed quarters: {len(completed)}")
-            latest_q = completed[-1]
-            print(f"  Latest: {latest_q[0]}Q{latest_q[1]} ({latest_q[2]} stocks)")
-        else:
-            print("  No quarters completed")
+    }
+    missing = [symbol for symbol in symbols if symbol not in latest_by_symbol]
+    stale = [
+        {"symbol": symbol, "max_date": latest_by_symbol[symbol]}
+        for symbol in symbols
+        if symbol in latest_by_symbol and latest_by_symbol[symbol] != target_date
+    ]
+    latest_count = len(symbols) - len(missing) - len(stale)
+    return {
+        "latest_count": latest_count,
+        "missing": missing,
+        "stale": stale,
+    }
 
-    conn.close()
 
-    # --- Overall status ---
-    print("\n" + "=" * 70)
-    val_cov = coverage.get("valuation", {}).get("pct", 0)
-    if val_cov > 95:
-        print("Status: HEALTHY")
-    elif val_cov > 50:
-        print(f"Status: INCOMPLETE (valuation coverage {val_cov:.0f}%)")
-    else:
-        print(f"Status: INTERRUPTED (valuation coverage {val_cov:.0f}%)")
-        print("  Run the download again to resume:")
-        print("  poetry run python scripts/download_efficient.py")
-    print("=" * 70)
+def _add_check(
+    checks: list[dict[str, Any]],
+    name: str,
+    passed: bool,
+    severity: str = "error",
+    **details: Any,
+) -> None:
+    checks.append(
+        {
+            "name": name,
+            "status": "pass" if passed else "fail",
+            "severity": severity,
+            **details,
+        }
+    )
 
+
+def _inspect_export(
+    export_dir: Path,
+    market: str,
+    target_date: str,
+    symbols: list[str],
+    max_examples: int,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "path": str(export_dir),
+        "exists": export_dir.exists(),
+        "checks": [],
+    }
+    checks = result["checks"]
+    if not export_dir.exists():
+        _add_check(checks, "export_dir_exists", False, path=str(export_dir))
+        return result
+
+    manifest_path = export_dir / "manifest.json"
+    _add_check(checks, "manifest_exists", manifest_path.exists(), path=str(manifest_path))
+    manifest = {}
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        result["manifest"] = manifest
+        _add_check(
+            checks,
+            "manifest_version_matches_target",
+            manifest.get("version") == target_date,
+            expected=target_date,
+            actual=manifest.get("version"),
+        )
+        date_range = manifest.get("date_range") or {}
+        _add_check(
+            checks,
+            "manifest_end_matches_target",
+            date_range.get("end") == target_date,
+            expected=target_date,
+            actual=date_range.get("end"),
+        )
+
+    stock_files = {p.stem for p in (export_dir / "stocks").glob("*.parquet")}
+    valuation_files = {p.stem for p in (export_dir / "valuation").glob("*.parquet")}
+    result["stock_files"] = len(stock_files)
+    result["valuation_files"] = len(valuation_files)
+
+    missing_stock_files = sorted(set(symbols) - stock_files)
+    _add_check(
+        checks,
+        "active_stock_files_present",
+        not missing_stock_files,
+        expected=len(symbols),
+        actual=len(symbols) - len(missing_stock_files),
+        missing=missing_stock_files[:max_examples],
+        missing_count=len(missing_stock_files),
+    )
+
+    if market == "cn":
+        missing_valuation_files = sorted(set(symbols) - valuation_files)
+        _add_check(
+            checks,
+            "active_valuation_files_present",
+            not missing_valuation_files,
+            expected=len(symbols),
+            actual=len(symbols) - len(missing_valuation_files),
+            missing=missing_valuation_files[:max_examples],
+            missing_count=len(missing_valuation_files),
+        )
+
+    metadata_file = export_dir / "metadata" / "stock_metadata.parquet"
+    _add_check(
+        checks,
+        "stock_metadata_export_present",
+        metadata_file.exists(),
+        path=str(metadata_file),
+    )
+
+    return result
+
+
+def check_integrity(
+    db_path: str = DB_PATH,
+    market: str = "cn",
+    target_date: str | None = None,
+    export_dir: str | None = None,
+    max_examples: int = 20,
+) -> dict[str, Any]:
+    """Check local data completeness and return a machine-readable report."""
+    db_file = Path(db_path)
+    report: dict[str, Any] = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "market": market.upper(),
+        "db_path": str(db_file),
+        "status": "fail",
+        "checks": [],
+    }
+    checks = report["checks"]
+
+    if not db_file.exists():
+        _add_check(checks, "database_exists", False, path=str(db_file))
+        return report
+
+    _add_check(checks, "database_exists", True, path=str(db_file))
+    conn = duckdb.connect(str(db_file), read_only=True)
+    try:
+        table_counts = _table_counts(conn)
+        report["tables"] = table_counts
+
+        required_tables = ["stocks"]
+        if market == "cn":
+            required_tables.extend(["valuation", "stock_metadata"])
+        missing_tables = [table for table in required_tables if table not in table_counts]
+        _add_check(
+            checks,
+            "required_tables_present",
+            not missing_tables,
+            missing=missing_tables,
+        )
+        if missing_tables:
+            return report
+
+        if target_date is None:
+            target_date = _latest_date(conn, "stocks")
+        report["target_date"] = target_date
+        _add_check(
+            checks,
+            "target_date_available",
+            target_date is not None,
+            actual=target_date,
+        )
+        if target_date is None:
+            return report
+
+        symbols, anomaly_symbols = _stock_universe(conn, market, target_date)
+        report["active_symbols"] = len(symbols)
+        report["anomalies"] = {
+            "non_standard_prefix_symbols": anomaly_symbols[:max_examples],
+            "non_standard_prefix_count": len(anomaly_symbols),
+        }
+        _add_check(
+            checks,
+            "active_symbol_universe_non_empty",
+            bool(symbols),
+            actual=len(symbols),
+        )
+
+        stock_status = _symbols_latest_status(conn, "stocks", symbols, target_date)
+        report["stocks"] = stock_status
+        _add_check(
+            checks,
+            "active_stocks_latest",
+            stock_status["latest_count"] == len(symbols),
+            expected=len(symbols),
+            actual=stock_status["latest_count"],
+            missing=stock_status["missing"][:max_examples],
+            missing_count=len(stock_status["missing"]),
+            stale=stock_status["stale"][:max_examples],
+            stale_count=len(stock_status["stale"]),
+        )
+
+        if market == "cn":
+            valuation_status = _symbols_latest_status(
+                conn, "valuation", symbols, target_date
+            )
+            report["valuation"] = valuation_status
+            _add_check(
+                checks,
+                "active_valuation_latest",
+                valuation_status["latest_count"] == len(symbols),
+                expected=len(symbols),
+                actual=valuation_status["latest_count"],
+                missing=valuation_status["missing"][:max_examples],
+                missing_count=len(valuation_status["missing"]),
+                stale=valuation_status["stale"][:max_examples],
+                stale_count=len(valuation_status["stale"]),
+            )
+
+            delisted_missing_valuation = conn.execute(
+                """
+                SELECT COUNT(*) FROM stock_metadata m
+                WHERE NOT (
+                    m.de_listed_date IS NULL
+                    OR CAST(m.de_listed_date AS VARCHAR) > ?
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM valuation v WHERE v.symbol=m.symbol
+                )
+                """,
+                [target_date],
+            ).fetchone()[0]
+            report["delisted_missing_valuation"] = delisted_missing_valuation
+
+        if export_dir:
+            report["export"] = _inspect_export(
+                Path(export_dir),
+                market,
+                target_date,
+                symbols,
+                max_examples,
+            )
+            checks.extend(report["export"]["checks"])
+
+    finally:
+        conn.close()
+
+    failed_errors = [
+        check for check in checks
+        if check["status"] == "fail" and check.get("severity") == "error"
+    ]
+    report["status"] = "fail" if failed_errors else "pass"
     return report
 
 
-if __name__ == "__main__":
+def print_human_report(report: dict[str, Any]) -> None:
+    print("=" * 70)
+    print("SimTradeData Integrity Report")
+    print("=" * 70)
+    print(f"Market:      {report.get('market')}")
+    print(f"Target date: {report.get('target_date') or 'n/a'}")
+    print(f"Database:    {report.get('db_path')}")
+    print(f"Status:      {report.get('status', 'fail').upper()}")
+
+    if "tables" in report:
+        print("\n--- Table Row Counts ---")
+        for table, count in sorted(report["tables"].items()):
+            print(f"  {table:30s} {count:>12,} rows")
+
+    print("\n--- Active Data Coverage ---")
+    active_count = report.get("active_symbols", 0)
+    stocks = report.get("stocks") or {}
+    print(
+        f"  stocks latest:    {stocks.get('latest_count', 0):>6,} / "
+        f"{active_count:>6,}"
+    )
+    if "valuation" in report:
+        valuation = report["valuation"]
+        print(
+            f"  valuation latest: {valuation.get('latest_count', 0):>6,} / "
+            f"{active_count:>6,}"
+        )
+    if report.get("delisted_missing_valuation") is not None:
+        print(
+            f"  delisted missing valuation: "
+            f"{report['delisted_missing_valuation']:,}"
+        )
+
+    anomalies = report.get("anomalies") or {}
+    if anomalies.get("non_standard_prefix_count"):
+        print("\n--- Anomalies ---")
+        print(
+            f"  non-standard prefix symbols: "
+            f"{anomalies['non_standard_prefix_count']}"
+        )
+        print(f"  examples: {', '.join(anomalies['non_standard_prefix_symbols'])}")
+
+    if "export" in report:
+        export = report["export"]
+        print("\n--- Export ---")
+        print(f"  path:            {export.get('path')}")
+        print(f"  stock files:     {export.get('stock_files', 0):,}")
+        print(f"  valuation files: {export.get('valuation_files', 0):,}")
+
+    failed = [
+        check for check in report.get("checks", [])
+        if check["status"] == "fail"
+    ]
+    if failed:
+        print("\n--- Failed Checks ---")
+        for check in failed:
+            print(f"  {check['name']}: {check}")
+
+    print("=" * 70)
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="Check SimTradeData integrity")
+    parser.add_argument("--db-path", default=DB_PATH, help="DuckDB database path")
+    parser.add_argument("--market", default="cn", choices=["cn", "us"])
+    parser.add_argument(
+        "--target-date",
+        default=None,
+        help="Expected latest date (YYYY-MM-DD). Defaults to MAX(stocks.date).",
+    )
+    parser.add_argument(
+        "--export-dir",
+        default=None,
+        help="Optional Parquet export directory to verify",
+    )
+    parser.add_argument(
+        "--json-output",
+        default=None,
+        help="Write machine-readable report JSON to this path",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON instead of the human report",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit non-zero when required completeness checks fail",
+    )
+    parser.add_argument(
+        "--max-examples",
+        type=int,
+        default=20,
+        help="Maximum missing/stale symbols to include in examples",
+    )
     parser.add_argument(
         "--fix",
         action="store_true",
-        help="Re-run download to fill missing data",
+        help="Deprecated. Integrity checks no longer start downloads.",
     )
     args = parser.parse_args()
 
-    report = check_integrity()
-
     if args.fix:
-        val_missing = report.get("missing_stocks", {}).get("valuation", [])
-        if val_missing:
-            print(f"\nRe-downloading {len(val_missing):,} missing stocks...")
-            from scripts.download_efficient import download_all_data
-            download_all_data()
-        else:
-            print("\nNo missing stocks to fix.")
+        print("--fix is disabled; use a targeted remediation command instead.")
+        return 2
+
+    report = check_integrity(
+        db_path=args.db_path,
+        market=args.market,
+        target_date=args.target_date,
+        export_dir=args.export_dir,
+        max_examples=args.max_examples,
+    )
+
+    if args.json_output:
+        path = Path(args.json_output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, default=_json_default),
+            encoding="utf-8",
+        )
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=_json_default))
+    else:
+        print_human_report(report)
+
+    if args.strict and report["status"] != "pass":
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
