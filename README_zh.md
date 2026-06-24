@@ -423,6 +423,12 @@ poetry run python scripts/export_parquet.py --delta --base-version 2026-06-20 --
 无新交易日时全部股票秒级跳过。
 delta 导出只包含指定版本窗口内变化的 symbol 表行和 manifest；首次安装、校准和失败回退仍使用完整 Parquet 导出。
 
+生产环境建议使用每日脚本，并把执行时间放到交易日较晚时段（例如 21:30 以后）。脚本会在下载失败或版本未更新时重试，适配数据源延迟发布：
+
+```bash
+DOWNLOAD_ATTEMPTS=4 RETRY_INTERVAL_SECONDS=1800 bash scripts/run_daily.sh
+```
+
 ### 数据质量
 - 数据来自 BaoStock 免费数据源
 - 仅供学习研究使用

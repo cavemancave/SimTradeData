@@ -16,11 +16,13 @@
 #   LOCK_FILE           Path to lock file (default: /tmp/simtradedata_daily.lock)
 #   LOG_DIR             Directory for run logs (default: logs/daily)
 #   LOG_RETENTION_DAYS  Days to keep logs (default: 30)
+#   DOWNLOAD_ATTEMPTS   Download attempts before giving up/no-op (default: 4)
+#   RETRY_INTERVAL_SECONDS Seconds between download retries (default: 1800)
 
 set -euo pipefail
 
 # ── Configuration ───────────────────────────────────────────────────
-MARKET="${MARKET:-cn}"
+MARKET="$(echo "${MARKET:-cn}" | tr '[:upper:]' '[:lower:]')"
 PUBLISH_TARGETS="${PUBLISH_TARGETS:-github}"
 SIMTRADE_DATA_DIR="${SIMTRADE_DATA_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 COS_BUCKET="${COS_BUCKET:-}"
@@ -30,6 +32,23 @@ ALERT_WEBHOOK_URL="${ALERT_WEBHOOK_URL:-}"
 LOCK_FILE="${LOCK_FILE:-/tmp/simtradedata_daily_${MARKET}.lock}"
 LOG_DIR="${LOG_DIR:-$SIMTRADE_DATA_DIR/logs/daily}"
 LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
+DOWNLOAD_ATTEMPTS="${DOWNLOAD_ATTEMPTS:-4}"
+RETRY_INTERVAL_SECONDS="${RETRY_INTERVAL_SECONDS:-1800}"
+
+if [[ "$MARKET" != "cn" && "$MARKET" != "us" ]]; then
+  echo "ERROR: MARKET must be cn or us"
+  exit 1
+fi
+
+if ! [[ "$DOWNLOAD_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: DOWNLOAD_ATTEMPTS must be a positive integer"
+  exit 1
+fi
+
+if ! [[ "$RETRY_INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: RETRY_INTERVAL_SECONDS must be a non-negative integer"
+  exit 1
+fi
 
 # ── Acquire single-instance lock ────────────────────────────────────
 exec 200>"$LOCK_FILE"
@@ -58,6 +77,14 @@ alert() {
 
 cleanup_logs() {
   find "$LOG_DIR" -name "*.log" -mtime "+$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
+}
+
+run_download() {
+  if [[ "$MARKET" == "us" ]]; then
+    poetry run python scripts/download_us.py
+  else
+    poetry run python scripts/download.py
+  fi
 }
 
 # ── Determine DuckDB path by market ─────────────────────────────────
@@ -90,6 +117,8 @@ log "  Market:          $MARKET"
 log "  Publish targets: $PUBLISH_TARGETS"
 log "  Data dir:        $SIMTRADE_DATA_DIR"
 log "  Log file:        $LOG_FILE"
+log "  Download tries:  $DOWNLOAD_ATTEMPTS"
+log "  Retry interval:  ${RETRY_INTERVAL_SECONDS}s"
 
 cd "$SIMTRADE_DATA_DIR"
 
@@ -97,18 +126,35 @@ cd "$SIMTRADE_DATA_DIR"
 OLD_VERSION=$(get_version "$MARKET")
 log "Version before download: ${OLD_VERSION:-none}"
 
-# 2. Run download
-log "--- Running download.py ---"
-if ! poetry run python scripts/download.py; then
-  rc=$?
-  alert "download.py failed (exit code: ${rc})"
-  cleanup_logs
-  exit $rc
-fi
+# 2. Run download with retry. BaoStock and other free sources can publish late;
+# retry both hard failures and successful runs that do not advance the version.
+NEW_VERSION=""
+DOWNLOAD_RC=0
+for attempt in $(seq 1 "$DOWNLOAD_ATTEMPTS"); do
+  log "--- Running download attempt ${attempt}/${DOWNLOAD_ATTEMPTS} ---"
+  if run_download; then
+    DOWNLOAD_RC=0
+    NEW_VERSION=$(get_version "$MARKET")
+    log "Version after download:  ${NEW_VERSION:-none}"
 
-# 3. Check for new data
-NEW_VERSION=$(get_version "$MARKET")
-log "Version after download:  ${NEW_VERSION:-none}"
+    if [[ -z "$NEW_VERSION" ]]; then
+      DOWNLOAD_RC=1
+      log "No data in stocks table after download"
+    elif [[ "$OLD_VERSION" != "$NEW_VERSION" ]]; then
+      break
+    else
+      log "No new data yet (version unchanged: $NEW_VERSION)"
+    fi
+  else
+    DOWNLOAD_RC=$?
+    log "Download attempt ${attempt}/${DOWNLOAD_ATTEMPTS} failed (exit code: ${DOWNLOAD_RC})"
+  fi
+
+  if [[ "$attempt" -lt "$DOWNLOAD_ATTEMPTS" ]]; then
+    log "Retrying in ${RETRY_INTERVAL_SECONDS}s..."
+    sleep "$RETRY_INTERVAL_SECONDS"
+  fi
+done
 
 if [[ -z "$NEW_VERSION" ]]; then
   alert "No data in stocks table after download"
@@ -116,8 +162,14 @@ if [[ -z "$NEW_VERSION" ]]; then
   exit 1
 fi
 
+if [[ "$DOWNLOAD_RC" -ne 0 ]]; then
+  alert "download failed after ${DOWNLOAD_ATTEMPTS} attempts (last exit code: ${DOWNLOAD_RC})"
+  cleanup_logs
+  exit "$DOWNLOAD_RC"
+fi
+
 if [[ "$OLD_VERSION" == "$NEW_VERSION" ]]; then
-  log "No new data (version unchanged: $NEW_VERSION). Skipping release."
+  log "No new data after ${DOWNLOAD_ATTEMPTS} attempts (version unchanged: $NEW_VERSION). Skipping release."
   log "=== Pipeline Complete (no-op) ==="
   cleanup_logs
   exit 0

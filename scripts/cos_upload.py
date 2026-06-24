@@ -14,8 +14,8 @@ Usage:
         --bucket my-bucket \
         --region ap-guangzhou
 
-The releases.json stored on COS is compatible with SimTradeAPI's
-_fetch_releases() parser, so no download-side code changes are needed.
+The releases.json stored on COS is compatible with GitHub Releases-style
+download clients, so no download-side code changes are needed.
 """
 
 import argparse
@@ -134,7 +134,7 @@ def upload_file(
         data=data, content_type="application/gzip", timeout=600,
     )
     if status == 200:
-        print(f"  ✓ Uploaded")
+        print("  ✓ Uploaded")
         return True
     print(f"  ✗ Upload failed: HTTP {status}")
     if body:
