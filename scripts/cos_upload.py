@@ -26,7 +26,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -208,6 +208,36 @@ def _build_release_entry(
     }
 
 
+def _update_releases_index(
+    bucket: str,
+    region: str,
+    secret_id: str,
+    secret_key: str,
+    tag: str,
+    entry: dict,
+    max_releases: int,
+) -> bool:
+    """Fetch releases.json, prepend a new entry, trim old ones, and upload.
+
+    Returns True on success.
+    """
+    releases = _fetch_releases_json(bucket, region, secret_id, secret_key)
+
+    # Remove existing entry for this tag (idempotent re-upload)
+    releases = [r for r in releases if r.get("tag_name") != tag]
+
+    # Prepend new entry
+    releases.insert(0, entry)
+
+    # Trim old entries
+    if len(releases) > max_releases:
+        trimmed = len(releases) - max_releases
+        releases = releases[:max_releases]
+        print(f"  Trimmed {trimmed} old releases")
+
+    return _put_releases_json(bucket, region, releases, secret_id, secret_key)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Upload release artifacts to Tencent COS"
@@ -256,7 +286,7 @@ def main():
 
     cos_key = f"{args.key_prefix.strip('/')}/{file_path.name}"
 
-    print(f"COS Upload: {args.bucket}.cos.{args.region}.myqcloud.com")
+    print(f"COS Upload: {_cos_host(args.bucket, args.region)}")
     print(f"  Tag:  {tag}")
     print(f"  File: {file_path.name}")
 
@@ -266,28 +296,16 @@ def main():
     ):
         sys.exit(1)
 
-    # 2. Fetch existing releases index
-    releases = _fetch_releases_json(args.bucket, args.region, secret_id, secret_key)
-
-    # 3. Remove existing entry for this tag (idempotent re-upload)
-    releases = [r for r in releases if r.get("tag_name") != tag]
-
-    # 4. Prepend new entry
+    # 2. Update releases index
     file_size = file_path.stat().st_size
     entry = _build_release_entry(
         data_manifest, file_path, file_size,
         tag, args.bucket, args.region, cos_key,
     )
-    releases.insert(0, entry)
-
-    # 5. Trim old entries
-    if len(releases) > args.max_releases:
-        trimmed = len(releases) - args.max_releases
-        releases = releases[:args.max_releases]
-        print(f"  Trimmed {trimmed} old releases")
-
-    # 6. Upload updated releases.json
-    if not _put_releases_json(args.bucket, args.region, releases, secret_id, secret_key):
+    if not _update_releases_index(
+        args.bucket, args.region, secret_id, secret_key,
+        tag, entry, args.max_releases,
+    ):
         sys.exit(1)
 
     print("Done.")

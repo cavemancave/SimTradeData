@@ -75,7 +75,7 @@ release_market() {
   tar -czf "$archive" -C "$export_dir" .
 
   local size
-  size=$(ls -lh "$archive" | awk '{print $5}')
+  size=$(du -h "$archive" | cut -f1)
   echo "  -> $archive ($size)"
 
   local github_ok=true
