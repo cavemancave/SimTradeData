@@ -297,16 +297,18 @@ class EastMoneyFetcher(BaseFetcher):
 
         rows = []
         for rec in records:
-            stats_date = rec["STATISTICS_DATE"]
+            stats_date = rec.get("STATISTICS_DATE") or rec["DATE"]
             if "T" in stats_date:
                 stats_date = stats_date.split("T")[0]
+            else:
+                stats_date = stats_date[:10]
 
             rows.append({
                 "symbol": rec["SECUCODE"],
                 "date": stats_date,
-                "rzye": rec["FIN_BALANCE"],
-                "rqyl": rec["LOAN_BALANCE"],
-                "rzrqye": rec["MARGIN_BALANCE"],
+                "rzye": rec.get("FIN_BALANCE", rec.get("RZYE")),
+                "rqyl": rec.get("LOAN_BALANCE", rec.get("RQYL")),
+                "rzrqye": rec.get("MARGIN_BALANCE", rec.get("RZRQYE")),
             })
 
         return pd.DataFrame(rows)
@@ -527,36 +529,45 @@ class EastMoneyFetcher(BaseFetcher):
             DataFrame with columns: symbol, date, rzye (financing balance),
             rqyl (securities lending balance), rzrqye (total margin balance).
         """
-        # datacenter-web uses .SH instead of .SS
-        secu_code = symbol.replace(".SS", ".SH")
+        code = symbol.split(".", 1)[0]
 
         url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-        params = {
-            "reportName": "RPTA_WEB_MARGIN_DAILYTRADE",
-            "columns": (
-                "SECUCODE,STATISTICS_DATE,"
-                "FIN_BALANCE,LOAN_BALANCE,MARGIN_BALANCE"
-            ),
-            "filter": (
-                f"(SECUCODE=\"{secu_code}\")"
-                f"(STATISTICS_DATE>='{start_date}')"
-                f"(STATISTICS_DATE<='{end_date}')"
-            ),
-            "pageNumber": "1",
-            "pageSize": "500",
-            "sortTypes": "-1",
-            "sortColumns": "STATISTICS_DATE",
-            "source": "WEB",
-            "client": "WEB",
-        }
+        page_size = 500
+        page = 1
+        records = []
 
-        data = self._get(url, params)
+        while True:
+            params = {
+                "reportName": "RPTA_WEB_RZRQ_GGMX",
+                "columns": "DATE,SECUCODE,RZYE,RQYL,RZRQYE",
+                "filter": f"(SCODE=\"{code}\")",
+                "pageNumber": str(page),
+                "pageSize": str(page_size),
+                "sortTypes": "-1",
+                "sortColumns": "DATE",
+                "source": "WEB",
+                "client": "WEB",
+            }
+            data = self._get(url, params)
 
-        records = (data.get("result") or {}).get("data")
+            result = data.get("result") or {}
+            page_records = result.get("data") or []
+            if not page_records:
+                break
+            records.extend(page_records)
+
+            dates = [rec["DATE"][:10] for rec in page_records if rec.get("DATE")]
+            if dates and min(dates) < start_date:
+                break
+            if page >= result.get("pages", page):
+                break
+            page += 1
+
         if not records:
             logger.debug("No margin data for %s", symbol)
             return pd.DataFrame()
 
         df = self.parse_margin(records)
+        df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
         logger.info("Fetched %d margin records for %s", len(df), symbol)
         return df

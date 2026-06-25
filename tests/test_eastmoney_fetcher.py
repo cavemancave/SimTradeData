@@ -148,3 +148,56 @@ class TestParseMargin:
         df = EastMoneyFetcher.parse_margin([])
         assert isinstance(df, pd.DataFrame)
         assert df.empty
+
+    def test_new_margin_record_shape(self):
+        records = [
+            {
+                "SECUCODE": "600000.SH",
+                "DATE": "2026-06-24 00:00:00",
+                "RZYE": 1000000.00,
+                "RQYL": 500000.00,
+                "RZRQYE": 1500000.00,
+            }
+        ]
+        df = EastMoneyFetcher.parse_margin(records)
+        assert len(df) == 1
+        assert df.iloc[0]["symbol"] == "600000.SH"
+        assert df.iloc[0]["date"] == "2026-06-24"
+        assert df.iloc[0]["rzye"] == 1000000.00
+        assert df.iloc[0]["rqyl"] == 500000.00
+        assert df.iloc[0]["rzrqye"] == 1500000.00
+
+    def test_fetch_margin_uses_new_endpoint_and_filters_dates(self, monkeypatch):
+        fetcher = EastMoneyFetcher()
+
+        def fake_get(_url, params):
+            assert params["reportName"] == "RPTA_WEB_RZRQ_GGMX"
+            assert params["filter"] == '(SCODE="600000")'
+            return {
+                "result": {
+                    "pages": 1,
+                    "data": [
+                        {
+                            "SECUCODE": "600000.SH",
+                            "DATE": "2026-06-24 00:00:00",
+                            "RZYE": 1.0,
+                            "RQYL": 2.0,
+                            "RZRQYE": 3.0,
+                        },
+                        {
+                            "SECUCODE": "600000.SH",
+                            "DATE": "2026-05-30 00:00:00",
+                            "RZYE": 4.0,
+                            "RQYL": 5.0,
+                            "RZRQYE": 6.0,
+                        },
+                    ],
+                }
+            }
+
+        monkeypatch.setattr(fetcher, "_get", fake_get)
+
+        df = fetcher.fetch_margin("600000.SS", "2026-06-01", "2026-06-25")
+
+        assert len(df) == 1
+        assert df.iloc[0]["date"] == "2026-06-24"
