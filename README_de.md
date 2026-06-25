@@ -117,38 +117,38 @@ poetry shell
 
 **Empfohlen: Einheitlicher Download-Befehl**
 
-Ein Befehl lädt alle Daten herunter und orchestriert Mootdx und BaoStock automatisch:
+Ein Befehl lädt alle Daten herunter, nutzt das TDX-Tagespaket für den schnellen OHLCV-Pfad und orchestriert danach Mootdx und BaoStock:
 
 ```bash
-# Vollständiger Download (empfohlen)
+# Tägliche/produktive CN-Aktualisierung (empfohlen)
+poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv
+
+# Vollständige Fallback-Orchestrierung ohne TDX-Paket
 poetry run python scripts/download.py
 
-# Schneller Erstdownload: TDX-Tagespaket importieren, dann Kapitalmaßnahmen etc. ergänzen
-poetry run python scripts/download.py --tdx-download --source mootdx --skip-fundamentals
-
 # Bereits heruntergeladene TDX-ZIP-Datei verwenden
-poetry run python scripts/download.py --tdx-source data/downloads/hsjday.zip --source mootdx
+poetry run python scripts/download.py --tdx-source data/downloads/hsjday.zip --skip-mootdx-ohlcv
 
 # Datenstatus prüfen
 poetry run python scripts/download.py --status
 
 # Finanzdaten überspringen (schneller)
-poetry run python scripts/download.py --skip-fundamentals
+poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv --skip-fundamentals
 ```
 
 **Arbeitsteilung der Datenquellen**
 
 | Datentyp | Quelle | Grund |
 |----------|--------|-------|
-| OHLCV-Marktdaten (erstmalig) | TDX-Tagespaket | Am schnellsten, ~500MB Massenimport |
-| OHLCV-Marktdaten (inkrementell) | Mootdx | Schnell, lokales Netzwerk |
+| OHLCV-Marktdaten (taeglich/Vollhistorie) | TDX-Tagespaket | Am schnellsten, ~500MB Massenimport plus aktuelle Tagesdaten |
+| OHLCV-Marktdaten (Fallback/Backfill) | Mootdx | Fallback pro Symbol, wenn das TDX-Paket nicht verfuegbar ist |
 | Kapitalmaßnahmen (XDXR) | Mootdx | Vollständigere Daten |
 | Massenfinanzdaten | Mootdx | Ein ZIP = alle Aktien |
 | Bewertung KGV/KBV/KUV/Umschlag | BaoStock | Exklusive Daten |
 | ST/Aussetzungsstatus | BaoStock | Exklusive Daten |
 | Indexbestandteile | BaoStock | Exklusive Daten |
-| Handelskalender | Mootdx | Inklusive bei Marktdaten |
-| Benchmark-Index | Mootdx | Inklusive bei Marktdaten |
+| Handelskalender | Mootdx | Liefert den Boersenkalender |
+| Benchmark-Index | Mootdx | Liefert Benchmark-Zeitreihen |
 
 **US-Aktiendaten (yfinance)**
 

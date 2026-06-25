@@ -14,8 +14,8 @@ from typing import List, Optional
 import pandas as pd
 
 from simtradedata.config.mootdx_finvalue_map import (
-    CORE_FUNDAMENTAL_FIELDS,
     FINVALUE_TO_PTRADE,
+    FULL_FUNDAMENTAL_FIELDS,
     parse_finvalue_date,
 )
 
@@ -157,7 +157,7 @@ class MootdxAffairFetcher:
             year: Year (e.g., 2024)
             quarter: Quarter (1-4)
             fields: List of PTrade field names to include.
-                   Defaults to CORE_FUNDAMENTAL_FIELDS.
+                   Defaults to all mapped FINVALUE statement/indicator fields.
 
         Returns:
             DataFrame indexed by stock code, with PTrade field names as columns.
@@ -195,12 +195,12 @@ class MootdxAffairFetcher:
 
         Args:
             raw_df: Raw DataFrame from Affair.parse()
-            fields: Fields to include (PTrade names). None = CORE_FUNDAMENTAL_FIELDS
+            fields: Fields to include (PTrade names). None = all mapped fields
 
         Returns:
             DataFrame with PTrade field names
         """
-        target_fields = fields or CORE_FUNDAMENTAL_FIELDS
+        target_fields = fields or FULL_FUNDAMENTAL_FIELDS
         num_columns = len(raw_df.columns)
 
         # Extract columns by position index using iloc to avoid duplicate name issues

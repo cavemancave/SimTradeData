@@ -122,26 +122,26 @@ poetry shell
 
 **推荐方式：统一下载命令**
 
-一条命令完成所有数据下载，自动编排 Mootdx 和 BaoStock 各自擅长的数据：
+一条命令完成所有数据下载，使用 TDX 日线包作为快速 OHLCV 路径，再自动编排 Mootdx 和 BaoStock 各自擅长的数据：
 
 ```bash
-# 完整下载（推荐）
-# Mootdx: 行情、除权除息、批量财务、交易日历、基准指数
+# 每日/生产 CN 刷新（推荐）
+# TDX: OHLCV 全历史和日线包导入
+# Mootdx: 除权除息、批量财务、交易日历、基准指数
 # BaoStock: 估值指标、ST/停牌状态、指数成分股
+poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv
+
+# 不使用 TDX 日线包的完整兜底编排
 poetry run python scripts/download.py
 
-# 首次下载加速：先导入 TDX 日线包，再补充除权除息等
-# （6000+ 只股票的 OHLCV 从数小时缩短到几分钟）
-poetry run python scripts/download.py --tdx-download --source mootdx --skip-fundamentals
-
 # 使用已下载的 TDX ZIP 文件
-poetry run python scripts/download.py --tdx-source data/downloads/hsjday.zip --source mootdx
+poetry run python scripts/download.py --tdx-source data/downloads/hsjday.zip --skip-mootdx-ohlcv
 
 # 查看数据状态
 poetry run python scripts/download.py --status
 
 # 跳过财务数据（更快）
-poetry run python scripts/download.py --skip-fundamentals
+poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv --skip-fundamentals
 
 # 仅运行 Mootdx 阶段
 poetry run python scripts/download.py --source mootdx
@@ -154,15 +154,15 @@ poetry run python scripts/download.py --source baostock
 
 | 数据类型 | 负责数据源 | 原因 |
 |---------|-----------|------|
-| 行情 OHLCV（首次） | TDX 日线包 | 最快，~500MB 一次性导入全部历史 |
-| 行情 OHLCV（增量） | Mootdx | 速度快，本地网络 |
+| 行情 OHLCV（每日/全历史） | TDX 日线包 | 最快，~500MB 一次性导入全部历史和最新日线 |
+| 行情 OHLCV（兜底/回补） | Mootdx | TDX 日线包不可用时逐股兜底 |
 | 除权除息 (XDXR) | Mootdx | 数据更完整 |
 | 批量财务数据 | Mootdx | 一个ZIP=所有股票，远优于逐股查询 |
 | 估值 PE/PB/PS/换手率 | BaoStock | 独有数据 |
 | ST/停牌状态 | BaoStock | 独有数据 |
 | 指数成分股 | BaoStock | 独有数据 |
-| 交易日历 | Mootdx | 随行情一起 |
-| 基准指数 | Mootdx | 随行情一起 |
+| 交易日历 | Mootdx | 提供交易所日历 |
+| 基准指数 | Mootdx | 提供基准指数序列 |
 
 **单独使用某个数据源**
 
@@ -397,7 +397,7 @@ BATCH_SIZE = 20
 | 历史起始 | 2015年 | 2015年 | 2015年 | 完整历史 | 完整历史 |
 | API Key | 不需要 | 不需要 | 不需要 | N/A | 不需要 |
 
-> **推荐**：使用 `scripts/download.py` 统一命令，自动让 Mootdx 负责行情和财务，BaoStock 负责估值和状态，各取所长。
+> **推荐**：每日/生产 CN 刷新使用 `scripts/download.py --tdx-download --skip-mootdx-ohlcv`。TDX 负责 OHLCV，Mootdx 补充除权除息/财务/日历/基准指数，BaoStock 负责估值/状态。
 
 ### 增量更新机制
 
@@ -410,7 +410,7 @@ BATCH_SIZE = 20
 
 ```bash
 # 1. 增量下载（仅获取新数据，已有数据自动跳过）
-poetry run python scripts/download.py
+poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv
 
 # 2. 导出为 Parquet（覆盖旧的导出）
 poetry run python scripts/export_parquet.py
@@ -419,11 +419,11 @@ poetry run python scripts/export_parquet.py
 poetry run python scripts/export_parquet.py --delta --base-version 2026-06-20 --target-version 2026-06-22
 ```
 
-第 1 步会自动检测 DuckDB 中已有数据的最新日期，只下载增量部分。
-无新交易日时全部股票秒级跳过。
+第 1 步会导入最新 TDX 日线包，然后跳过 Mootdx OHLCV，并刷新剩余 Mootdx/BaoStock 数据。
+无新交易日时已有行会快速跳过。
 delta 导出只包含指定版本窗口内变化的 symbol 表行和 manifest；首次安装、校准和失败回退仍使用完整 Parquet 导出。
 
-生产环境建议使用每日脚本，并把执行时间放到交易日较晚时段（例如 22:30 以后）。默认策略是单次下载尝试，并在发布前后运行完整性门禁，避免数据源延迟时自动反复请求：
+生产环境建议使用每日脚本，并把执行时间放到交易日较晚时段（例如 22:30 以后）。该脚本默认使用同一条 TDX 快路径。默认策略是单次下载尝试，并在发布前后运行完整性门禁，避免数据源延迟时自动反复请求：
 
 ```bash
 DOWNLOAD_ATTEMPTS=1 INTEGRITY_STRICT=1 bash scripts/run_daily.sh

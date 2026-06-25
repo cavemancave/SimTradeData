@@ -2,6 +2,8 @@
 
 本文档定义了 PTrade 数据包的 Parquet 格式规范，作为 SimTradeData 导出的目标格式。
 
+财务字段覆盖情况见 [PTrade Financial Field Coverage](PTRADE_FINANCIAL_COVERAGE.md)。
+
 ## 目录结构
 
 ```
@@ -98,8 +100,41 @@ data/
 |------|------|------|------|
 | `date` | timestamp[ns] | 报告期末 | **主键**, 季末日期 |
 | `publ_date` | string | 公布日期 | YYYYMMDD |
+| `basic_eps` | double | 基本每股收益 | |
+| `undivided_profit` | double | 每股未分配利润 | 可null |
+| `naps` | double | 每股净资产 | |
+| `capital_surplus_fund_ps` | double | 每股资本公积金 | 可null |
+| `net_operate_cash_flow_ps` | double | 每股经营活动现金流量净额 | 可null |
+| `cash_equivalents` | double | 货币资金 | 可null |
+| `account_receivable` | double | 应收账款 | 可null |
+| `inventories` | double | 存货 | 可null |
+| `total_current_assets` | double | 流动资产合计 | 可null |
+| `fixed_assets` | double | 固定资产 | 可null |
+| `intangible_assets` | double | 无形资产 | 可null |
+| `total_non_current_assets` | double | 非流动资产合计 | 可null |
+| `total_assets` | double | 资产总计 | |
+| `shortterm_loan` | double | 短期借款 | 可null |
+| `accounts_payable` | double | 应付账款 | 可null |
+| `total_current_liability` | double | 流动负债合计 | 可null |
+| `longterm_loan` | double | 长期借款 | 可null |
+| `total_non_current_liability` | double | 非流动负债合计 | 可null |
+| `total_liability` | double | 负债合计 | |
+| `paidin_capital` | double | 实收资本/股本 | 可null |
+| `retained_profit` | double | 未分配利润 | 可null |
+| `total_shareholder_equity` | double | 所有者权益合计 | |
+| `operating_revenue` | double | 营业收入 | |
+| `operating_cost` | double | 营业成本 | 可null |
+| `financial_expense` | double | 财务费用 | 可null |
+| `operating_profit` | double | 营业利润 | |
+| `total_profit` | double | 利润总额 | |
+| `net_profit` | double | 净利润 | |
+| `np_parent_company_owners` | double | 归属于母公司所有者的净利润 | |
+| `net_operate_cash_flow` | double | 经营活动产生的现金流量净额 | |
+| `net_invest_cash_flow` | double | 投资活动产生的现金流量净额 | 可null |
+| `net_finance_cash_flow` | double | 筹资活动产生的现金流量净额 | 可null |
 | `operating_revenue_grow_rate` | double | 营收增长率 | % |
 | `net_profit_grow_rate` | double | 净利润增长率 | % |
+| `net_asset_grow_rate` | double | 净资产增长率 | % |
 | `basic_eps_yoy` | double | EPS同比 | |
 | `np_parent_company_yoy` | double | 归母净利润同比 | |
 | `net_profit_ratio` | double | 净利润率 | % |
@@ -121,6 +156,11 @@ data/
 | `interest_cover` | double | 利息覆盖率 | 可null |
 | `roic` | double | 投入资本回报率 | 可null |
 | `roa_ebit_ttm` | double | EBIT/总资产(TTM) | 可null |
+| `roe_weighted` | double | 加权 ROE | 可null |
+| `total_shares` | double | 总股本 | 股 |
+| `a_floats` | double | A股流通股本 | 股 |
+
+以上扩展字段使用 PTrade 财务 API 字段名；当上游 TDX/mootdx FINVALUE 批量包无法对应到 PTrade 字段时不导出。
 
 ---
 

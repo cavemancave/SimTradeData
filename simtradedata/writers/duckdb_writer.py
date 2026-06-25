@@ -24,6 +24,77 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = str(DUCKDB_PATH)
 
+_FUNDAMENTAL_EXTRA_COLUMNS = [
+    "basic_eps",
+    "undivided_profit",
+    "naps",
+    "capital_surplus_fund_ps",
+    "net_operate_cash_flow_ps",
+    "cash_equivalents",
+    "account_receivable",
+    "inventories",
+    "total_current_assets",
+    "fixed_assets",
+    "intangible_assets",
+    "total_non_current_assets",
+    "total_assets",
+    "shortterm_loan",
+    "accounts_payable",
+    "total_current_liability",
+    "longterm_loan",
+    "total_non_current_liability",
+    "total_liability",
+    "paidin_capital",
+    "retained_profit",
+    "total_shareholder_equity",
+    "operating_revenue",
+    "operating_cost",
+    "financial_expense",
+    "operating_profit",
+    "total_profit",
+    "net_profit",
+    "np_parent_company_owners",
+    "net_operate_cash_flow",
+    "net_invest_cash_flow",
+    "net_finance_cash_flow",
+    "net_asset_grow_rate",
+    "roe_weighted",
+]
+
+_FUNDAMENTAL_WRITE_COLUMNS = [
+    "symbol",
+    "date",
+    "publ_date",
+    "operating_revenue_grow_rate",
+    "net_profit_grow_rate",
+    "basic_eps_yoy",
+    "np_parent_company_yoy",
+    "net_profit_ratio",
+    "net_profit_ratio_ttm",
+    "gross_income_ratio",
+    "gross_income_ratio_ttm",
+    "roa",
+    "roa_ttm",
+    "roe",
+    "roe_ttm",
+    "total_asset_grow_rate",
+    "total_asset_turnover_rate",
+    "current_assets_turnover_rate",
+    "inventory_turnover_rate",
+    "accounts_receivables_turnover_rate",
+    "current_ratio",
+    "quick_ratio",
+    "debt_equity_ratio",
+    "interest_cover",
+    "roic",
+    "roa_ebit_ttm",
+    "total_shares",
+    "a_floats",
+    *_FUNDAMENTAL_EXTRA_COLUMNS,
+]
+
+_FUNDAMENTAL_EXPORT_EXTRA_SQL = ",\n                ".join(_FUNDAMENTAL_EXTRA_COLUMNS)
+
 
 class DuckDBWriter:
     """
@@ -167,6 +238,7 @@ class DuckDBWriter:
                 PRIMARY KEY (symbol, date)
             )
         """)
+        self._migrate_fundamentals_columns()
 
 
         self.conn.execute("""
@@ -333,6 +405,21 @@ class DuckDBWriter:
                 ALTER TABLE fundamentals_progress ADD COLUMN file_hash VARCHAR
             """)
             logger.info("Added file_hash column to fundamentals_progress")
+
+    def _migrate_fundamentals_columns(self) -> None:
+        """Add expanded PTrade financial statement columns when upgrading DBs."""
+        columns = self.conn.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'fundamentals'
+        """).fetchall()
+        column_names = {row[0] for row in columns}
+
+        for column in _FUNDAMENTAL_EXTRA_COLUMNS:
+            if column not in column_names:
+                self.conn.execute(f"""
+                    ALTER TABLE fundamentals ADD COLUMN {column} DOUBLE
+                """)
+                logger.info("Added fundamentals column %s", column)
 
     def _migrate_stock_metadata(self) -> None:
         """Migrate stock_metadata to keep official BaoStock type/status fields."""
@@ -704,36 +791,7 @@ class DuckDBWriter:
                 publ_dt.notna(), None
             )
 
-        columns = [
-            "symbol",
-            "date",
-            "publ_date",
-            "operating_revenue_grow_rate",
-            "net_profit_grow_rate",
-            "basic_eps_yoy",
-            "np_parent_company_yoy",
-            "net_profit_ratio",
-            "net_profit_ratio_ttm",
-            "gross_income_ratio",
-            "gross_income_ratio_ttm",
-            "roa",
-            "roa_ttm",
-            "roe",
-            "roe_ttm",
-            "total_asset_grow_rate",
-            "total_asset_turnover_rate",
-            "current_assets_turnover_rate",
-            "inventory_turnover_rate",
-            "accounts_receivables_turnover_rate",
-            "current_ratio",
-            "quick_ratio",
-            "debt_equity_ratio",
-            "interest_cover",
-            "roic",
-            "roa_ebit_ttm",
-            "total_shares",
-            "a_floats",
-        ]
+        columns = _FUNDAMENTAL_WRITE_COLUMNS
         available = [c for c in columns if c in df.columns]
         df = df[available]
 
@@ -1692,7 +1750,8 @@ class DuckDBWriter:
                 accounts_receivables_turnover_rate,
                 current_ratio, quick_ratio, debt_equity_ratio,
                 interest_cover, roic, roa_ebit_ttm,
-                total_shares, a_floats
+                total_shares, a_floats,
+                {_FUNDAMENTAL_EXPORT_EXTRA_SQL}
             FROM fundamentals
             WHERE symbol IN (SELECT symbol FROM changed_symbols)
             {cn_filter}
@@ -2167,7 +2226,8 @@ class DuckDBWriter:
                 accounts_receivables_turnover_rate,
                 current_ratio, quick_ratio, debt_equity_ratio,
                 interest_cover, roic, roa_ebit_ttm,
-                total_shares, a_floats
+                total_shares, a_floats,
+                {_FUNDAMENTAL_EXPORT_EXTRA_SQL}
             FROM fundamentals f
             {market_filter}
         """)
@@ -2587,7 +2647,8 @@ class DuckDBWriter:
                     accounts_receivables_turnover_rate,
                     current_ratio, quick_ratio, debt_equity_ratio,
                     interest_cover, roic, roa_ebit_ttm,
-                    total_shares, a_floats
+                    total_shares, a_floats,
+                    {_FUNDAMENTAL_EXPORT_EXTRA_SQL}
                 FROM fundamentals
                 WHERE symbol = '{symbol_escaped}'
                 ORDER BY date

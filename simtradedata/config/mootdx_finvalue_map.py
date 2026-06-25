@@ -13,45 +13,45 @@ FINVALUE_TO_PTRADE = {
 
     # Per-share indicators
     1: ("basic_eps", "Basic EPS", "yuan"),
-    2: ("eps_deducted", "EPS after non-recurring", "yuan"),
-    3: ("undistributed_profit_ps", "Undistributed profit per share", "yuan"),
-    4: ("nav_ps", "Net asset value per share", "yuan"),
-    5: ("capital_reserve_ps", "Capital reserve per share", "yuan"),
+    2: ("_eps_deducted", "EPS after non-recurring", "yuan"),
+    3: ("undivided_profit", "Undistributed profit per share", "yuan"),
+    4: ("naps", "Net asset value per share", "yuan"),
+    5: ("capital_surplus_fund_ps", "Capital reserve per share", "yuan"),
     6: ("roe", "Return on equity", "percent"),
-    7: ("operating_cash_flow_ps", "Operating cash flow per share", "yuan"),
+    7: ("net_operate_cash_flow_ps", "Operating cash flow per share", "yuan"),
 
     # Balance sheet - key items
-    8: ("cash", "Cash and equivalents", "yuan"),
-    11: ("accounts_receivable", "Accounts receivable", "yuan"),
-    17: ("inventory", "Inventory", "yuan"),
-    21: ("current_assets", "Total current assets", "yuan"),
+    8: ("cash_equivalents", "Cash and equivalents", "yuan"),
+    11: ("account_receivable", "Accounts receivable", "yuan"),
+    17: ("inventories", "Inventory", "yuan"),
+    21: ("total_current_assets", "Total current assets", "yuan"),
     27: ("fixed_assets", "Fixed assets", "yuan"),
     33: ("intangible_assets", "Intangible assets", "yuan"),
-    39: ("non_current_assets", "Total non-current assets", "yuan"),
+    39: ("total_non_current_assets", "Total non-current assets", "yuan"),
     40: ("total_assets", "Total assets", "yuan"),
-    41: ("short_term_debt", "Short-term borrowings", "yuan"),
+    41: ("shortterm_loan", "Short-term borrowings", "yuan"),
     44: ("accounts_payable", "Accounts payable", "yuan"),
-    54: ("current_liabilities", "Total current liabilities", "yuan"),
-    55: ("long_term_debt", "Long-term borrowings", "yuan"),
-    62: ("non_current_liabilities", "Total non-current liabilities", "yuan"),
-    63: ("total_liabilities", "Total liabilities", "yuan"),
-    64: ("paid_in_capital", "Paid-in capital (share capital)", "yuan"),
-    68: ("retained_earnings", "Undistributed profits", "yuan"),
-    72: ("total_equity", "Total shareholders' equity", "yuan"),
+    54: ("total_current_liability", "Total current liabilities", "yuan"),
+    55: ("longterm_loan", "Long-term borrowings", "yuan"),
+    62: ("total_non_current_liability", "Total non-current liabilities", "yuan"),
+    63: ("total_liability", "Total liabilities", "yuan"),
+    64: ("paidin_capital", "Paid-in capital (share capital)", "yuan"),
+    68: ("retained_profit", "Undistributed profits", "yuan"),
+    72: ("total_shareholder_equity", "Total shareholders' equity", "yuan"),
 
     # Income statement
     74: ("operating_revenue", "Operating revenue", "yuan"),
     75: ("operating_cost", "Operating cost", "yuan"),
-    80: ("finance_expense", "Finance expenses", "yuan"),
+    80: ("financial_expense", "Finance expenses", "yuan"),
     86: ("operating_profit", "Operating profit", "yuan"),
     92: ("total_profit", "Total profit", "yuan"),
     95: ("net_profit", "Net profit", "yuan"),
-    96: ("np_parent_company", "Net profit attributable to parent", "yuan"),
+    96: ("np_parent_company_owners", "Net profit attributable to parent", "yuan"),
 
     # Cash flow statement
-    107: ("operating_cash_flow_net", "Net cash from operations", "yuan"),
-    119: ("investing_cash_flow_net", "Net cash from investing", "yuan"),
-    128: ("financing_cash_flow_net", "Net cash from financing", "yuan"),
+    107: ("net_operate_cash_flow", "Net cash from operations", "yuan"),
+    119: ("net_invest_cash_flow", "Net cash from investing", "yuan"),
+    128: ("net_finance_cash_flow", "Net cash from financing", "yuan"),
 
     # Solvency analysis
     159: ("current_ratio", "Current ratio", "ratio"),
@@ -73,7 +73,7 @@ FINVALUE_TO_PTRADE = {
     # Profitability analysis
     197: ("roe_weighted", "Weighted ROE", "percent"),
     199: ("net_profit_ratio", "Net profit margin", "percent"),
-    200: ("total_asset_return_rate", "ROA", "percent"),
+    200: ("_total_asset_return_rate", "ROA", "percent"),
     202: ("gross_income_ratio", "Gross profit margin", "percent"),
 
     # Capital structure
@@ -82,11 +82,11 @@ FINVALUE_TO_PTRADE = {
     # Share capital
     238: ("total_shares", "Total shares", "shares"),
     239: ("a_floats", "Float A shares (listed circulating)", "shares"),
-    242: ("shareholder_count", "Number of shareholders", "count"),
+    242: ("_shareholder_count", "Number of shareholders", "count"),
 
     # TTM indicators
-    276: ("net_profit_ttm", "Net profit TTM", "yuan"),
-    283: ("operating_revenue_ttm", "Operating revenue TTM (10k yuan)", "wan_yuan"),
+    276: ("_net_profit_ttm", "Net profit TTM", "yuan"),
+    283: ("_operating_revenue_ttm", "Operating revenue TTM (10k yuan)", "wan_yuan"),
 
     # Announcement dates
     314: ("_publ_date_raw", "Financial report date (YYMMDD)", None),
@@ -99,7 +99,7 @@ PTRADE_TO_FINVALUE = {v[0]: k for k, v in FINVALUE_TO_PTRADE.items()}
 CORE_FUNDAMENTAL_FIELDS = [
     # Per-share
     "basic_eps",
-    "nav_ps",
+    "naps",
     "roe",
 
     # Growth
@@ -123,6 +123,14 @@ CORE_FUNDAMENTAL_FIELDS = [
     # Share data
     "total_shares",
     "a_floats",
+]
+
+# All mapped FINVALUE fields that can be exported as user-facing financial data.
+# Internal date helper fields are intentionally excluded.
+FULL_FUNDAMENTAL_FIELDS = [
+    name
+    for name, _desc, _unit in FINVALUE_TO_PTRADE.values()
+    if not name.startswith("_")
 ]
 
 

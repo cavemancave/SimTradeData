@@ -122,26 +122,26 @@ poetry shell
 
 **Recommended: Unified Download Command**
 
-A single command downloads all data, automatically orchestrating Mootdx and BaoStock for their respective strengths:
+A single command downloads all data, using the TDX daily package for the fast OHLCV path and then orchestrating Mootdx and BaoStock for their respective strengths:
 
 ```bash
-# Full download (recommended)
-# Mootdx: market data, corporate actions, bulk financials, trading calendar, benchmark index
+# Daily/production CN refresh (recommended)
+# TDX: OHLCV full history and daily package import
+# Mootdx: corporate actions, bulk financials, trading calendar, benchmark index
 # BaoStock: valuation metrics, ST/suspension status, index constituents
+poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv
+
+# Fallback full orchestration without the TDX package
 poetry run python scripts/download.py
 
-# Fast first-time download: import TDX daily package first, then supplement with corporate actions etc.
-# (6,000+ stocks OHLCV reduced from hours to minutes)
-poetry run python scripts/download.py --tdx-download --source mootdx --skip-fundamentals
-
 # Use an already-downloaded TDX ZIP file
-poetry run python scripts/download.py --tdx-source data/downloads/hsjday.zip --source mootdx
+poetry run python scripts/download.py --tdx-source data/downloads/hsjday.zip --skip-mootdx-ohlcv
 
 # Check data status
 poetry run python scripts/download.py --status
 
 # Skip financial data (faster)
-poetry run python scripts/download.py --skip-fundamentals
+poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv --skip-fundamentals
 
 # Run Mootdx phase only
 poetry run python scripts/download.py --source mootdx
@@ -154,15 +154,15 @@ poetry run python scripts/download.py --source baostock
 
 | Data Type | Source | Reason |
 |-----------|--------|--------|
-| OHLCV Market Data (first time) | TDX Daily Package | Fastest, ~500MB bulk import of full history |
-| OHLCV Market Data (incremental) | Mootdx | Fast, local network |
+| OHLCV Market Data (daily/full history) | TDX Daily Package | Fastest, ~500MB bulk import of full history and latest daily data |
+| OHLCV Market Data (fallback/backfill) | Mootdx | Per-symbol fallback when the TDX package is unavailable |
 | Corporate Actions (XDXR) | Mootdx | More complete data |
 | Bulk Financial Data | Mootdx | One ZIP = all stocks, far better than per-stock queries |
 | Valuation PE/PB/PS/Turnover | BaoStock | Exclusive data |
 | ST/Suspension Status | BaoStock | Exclusive data |
 | Index Constituents | BaoStock | Exclusive data |
-| Trading Calendar | Mootdx | Comes with market data |
-| Benchmark Index | Mootdx | Comes with market data |
+| Trading Calendar | Mootdx | Provides exchange calendar data |
+| Benchmark Index | Mootdx | Provides benchmark series |
 
 **Using Individual Data Sources**
 
@@ -402,7 +402,7 @@ BATCH_SIZE = 20
 | History Start | 2015 | 2015 | 2015 | Full history | Full history |
 | API Key | Not required | Not required | Not required | N/A | Not required |
 
-> **Recommended**: Use `scripts/download.py` unified command to automatically assign Mootdx for market data and financials, BaoStock for valuation and status, leveraging each source's strengths.
+> **Recommended**: Use `scripts/download.py --tdx-download --skip-mootdx-ohlcv` for daily/production CN refreshes. TDX handles OHLCV, Mootdx supplements corporate actions/financials/calendar/benchmark, and BaoStock handles valuation/status.
 
 ### Incremental Update Mechanism
 
@@ -415,7 +415,7 @@ BATCH_SIZE = 20
 
 ```bash
 # 1. Incremental download (fetches only new data, automatically skips existing)
-poetry run python scripts/download.py
+poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv
 
 # 2. Export to Parquet
 poetry run python scripts/export_parquet.py              # CN → data/export/cn/
@@ -425,10 +425,10 @@ poetry run python scripts/export_parquet.py --market us  # US → data/export/us
 poetry run python scripts/export_parquet.py --delta --base-version 2026-06-20 --target-version 2026-06-22
 ```
 
-Step 1 automatically detects the latest date of existing data in DuckDB and only downloads the delta. When there are no new trading days, all stocks are skipped in seconds.
+Step 1 imports the latest TDX daily package, skips Mootdx OHLCV after that fast path, and refreshes the remaining Mootdx/BaoStock datasets. When there are no new trading days, existing rows are skipped quickly.
 Delta export contains changed symbol-table rows and a manifest for the requested version window. First install, periodic reconciliation, and failed delta recovery still use the full Parquet export.
 
-For production scheduling, run the daily script later in the trading day (for example after 22:30). The default is one download attempt plus pre/post release integrity gates, so transient upstream delays do not trigger repeated requests automatically:
+For production scheduling, run the daily script later in the trading day (for example after 22:30). It uses the same TDX-backed fast path by default. The default is one download attempt plus pre/post release integrity gates, so transient upstream delays do not trigger repeated requests automatically:
 
 ```bash
 DOWNLOAD_ATTEMPTS=1 INTEGRITY_STRICT=1 bash scripts/run_daily.sh

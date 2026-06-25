@@ -7,8 +7,10 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
+from simtradedata.fetchers.mootdx_affair_fetcher import MootdxAffairFetcher
 from simtradedata.writers.duckdb_writer import DuckDBWriter
 
 
@@ -50,6 +52,73 @@ class TestWriteMoneyFlow:
             "SELECT net_main FROM money_flow WHERE symbol = '000001.SZ'"
         ).fetchone()
         assert result[0] == pytest.approx(2000.0)
+
+
+@pytest.mark.unit
+class TestExpandedFundamentals:
+    def setup_method(self):
+        self.writer = DuckDBWriter(db_path=":memory:")
+
+    def teardown_method(self):
+        self.writer.close()
+
+    def test_mootdx_affair_default_keeps_statement_fields(self):
+        raw = pd.DataFrame([[0.0] * 315], index=["000001"])
+        raw.iloc[0, 0] = 260331
+        raw.iloc[0, 40] = 123.0
+        raw.iloc[0, 74] = 456.0
+        raw.iloc[0, 107] = 789.0
+        raw.iloc[0, 314] = 260430
+
+        result = MootdxAffairFetcher()._convert_to_ptrade_format(raw)
+
+        assert result.loc[0, "end_date"] == pd.Timestamp("2026-03-31")
+        assert result.loc[0, "publ_date"] == pd.Timestamp("2026-04-30")
+        assert result.loc[0, "total_assets"] == pytest.approx(123.0)
+        assert result.loc[0, "operating_revenue"] == pytest.approx(456.0)
+        assert result.loc[0, "net_operate_cash_flow"] == pytest.approx(789.0)
+
+    def test_write_and_export_expanded_fundamentals(self, tmp_path):
+        df = pd.DataFrame({
+            "date": pd.to_datetime(["2026-03-31"]),
+            "publ_date": pd.to_datetime(["2026-04-30"]),
+            "roe": [10.5],
+            "total_assets": [123.0],
+            "total_liability": [45.0],
+            "operating_revenue": [456.0],
+            "net_profit": [67.0],
+            "net_operate_cash_flow": [789.0],
+            "total_shares": [1000.0],
+            "a_floats": [800.0],
+        })
+
+        self.writer.write_fundamentals("000001.SZ", df)
+
+        stored = self.writer.conn.execute("""
+            SELECT total_assets, operating_revenue, net_operate_cash_flow
+            FROM fundamentals
+            WHERE symbol = '000001.SZ'
+        """).fetchone()
+        assert stored == pytest.approx((123.0, 456.0, 789.0))
+
+        self.writer.write_stock_metadata(pd.DataFrame({
+            "symbol": ["000001.SZ"],
+            "stock_name": ["Ping An Bank"],
+            "listed_date": ["1991-04-03"],
+            "de_listed_date": ["2900-01-01"],
+            "security_type": ["1"],
+            "listing_status": ["1"],
+            "blocks": ["{}"],
+        }))
+        self.writer.export_to_parquet(str(tmp_path), market="cn")
+
+        exported = pq.read_table(
+            tmp_path / "fundamentals" / "000001.SZ.parquet"
+        ).to_pandas()
+        assert "total_assets" in exported.columns
+        assert "operating_revenue" in exported.columns
+        assert "net_operate_cash_flow" in exported.columns
+        assert exported.loc[0, "total_assets"] == pytest.approx(123.0)
 
 
 @pytest.mark.unit
