@@ -278,24 +278,57 @@ class EfficientBaoStockDownloader:
                 combined["tradestatus"], errors="coerce"
             ).fillna(1)
 
-        # Group by date and aggregate
-        for date_val in combined["date"].unique():
-            date_str = pd.to_datetime(date_val).strftime("%Y%m%d")
-            day_data = combined[combined["date"] == date_val]
+        combined["_date_str"] = pd.to_datetime(combined["date"]).dt.strftime("%Y%m%d")
 
-            # ST stocks
-            if "isST" in day_data.columns:
-                st_symbols = day_data[day_data["isST"] == 1]["symbol"].tolist()
-                if st_symbols:
-                    self.writer.write_stock_status(date_str, "ST", st_symbols)
+        if "isST" in combined.columns:
+            st_data = combined[combined["isST"] == 1]
+            for date_str, day_data in st_data.groupby("_date_str", sort=False):
+                self.writer.write_stock_status(date_str, "ST", day_data["symbol"].tolist())
 
-            # HALT stocks (tradestatus == 0)
-            if "tradestatus" in day_data.columns:
-                halt_symbols = day_data[day_data["tradestatus"] == 0]["symbol"].tolist()
-                if halt_symbols:
-                    self.writer.write_stock_status(date_str, "HALT", halt_symbols)
+        if "tradestatus" in combined.columns:
+            halt_data = combined[combined["tradestatus"] == 0]
+            for date_str, day_data in halt_data.groupby("_date_str", sort=False):
+                self.writer.write_stock_status(
+                    date_str, "HALT", day_data["symbol"].tolist()
+                )
 
         logger.info(f"Aggregated status data for {len(combined['date'].unique())} dates")
+
+    def refresh_daily_stock_status(self, target_date: str) -> None:
+        """Refresh target-day ST/HALT status from BaoStock's daily stock pool."""
+        from simtradedata.utils.code_utils import convert_to_ptrade_code
+
+        rs = bs.query_all_stock(day=target_date)
+        if rs.error_code != "0":
+            logger.warning("Failed to refresh stock status %s: %s", target_date, rs.error_msg)
+            return
+
+        stocks_df = rs.get_data()
+        if stocks_df.empty:
+            logger.warning("No stock status data for %s", target_date)
+            return
+
+        date_key = target_date.replace("-", "")
+        if "code" not in stocks_df.columns:
+            logger.warning("No code column in stock status data for %s", target_date)
+            return
+
+        stocks_df = stocks_df.copy()
+        stocks_df["symbol"] = stocks_df["code"].map(
+            lambda code: convert_to_ptrade_code(code, "baostock")
+        )
+
+        if "tradeStatus" in stocks_df.columns:
+            halted = stocks_df[stocks_df["tradeStatus"].astype(str) == "0"][
+                "symbol"
+            ].dropna().tolist()
+            self.writer.write_stock_status(date_key, "HALT", halted)
+
+        if "code_name" in stocks_df.columns:
+            st_symbols = stocks_df[
+                stocks_df["code_name"].astype(str).str.contains("ST", na=False)
+            ]["symbol"].dropna().tolist()
+            self.writer.write_stock_status(date_key, "ST", st_symbols)
 
     def download_fundamentals_by_quarter(
         self, stock_pool: list, start_date: str, end_date: str
@@ -459,10 +492,10 @@ def download_all_data(
                     return False
                 prefix = symbol[:3]
                 # Shanghai: 600/601/603/605 (main), 688/689 (STAR)
-                # Shenzhen: 000/001/002/003 (main), 300/301 (ChiNext)
+                # Shenzhen: 000/001/002/003 (main), 300/301/302 (ChiNext)
                 valid_prefixes = {
                     '600', '601', '603', '605', '688', '689',  # SH
-                    '000', '001', '002', '003', '300', '301',  # SZ
+                    '000', '001', '002', '003', '300', '301', '302',  # SZ
                 }
                 return prefix in valid_prefixes
 
@@ -618,6 +651,13 @@ def download_all_data(
 
             # Download global data
             print("\nDownloading global data...")
+
+            print("  Daily stock status...")
+            try:
+                downloader.refresh_daily_stock_status(end_date_str)
+                print("    Done")
+            except Exception as e:
+                logger.error(f"Failed to refresh daily stock status: {e}")
 
             # Trading calendar (skip in valuation-only mode)
             if not valuation_only:

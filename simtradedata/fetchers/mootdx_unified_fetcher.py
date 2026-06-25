@@ -148,7 +148,7 @@ class MootdxUnifiedFetcher:
             return []
 
         # Filter to stock and ETF codes (exclude indices, bonds, warrants)
-        sz_stock_prefixes = ("000", "001", "002", "003", "300", "301")
+        sz_stock_prefixes = ("000", "001", "002", "003", "300", "301", "302")
         sh_stock_prefixes = ("600", "601", "603", "605", "688", "689")
         etf_prefixes = ("15", "16", "50", "51", "52", "56", "58", "59")
 

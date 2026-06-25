@@ -169,11 +169,15 @@ def run_mootdx_download(
     skip_fundamentals: bool = False,
     download_dir: str | None = None,
     refresh_fundamentals: bool = False,
+    skip_ohlcv: bool = False,
 ) -> bool:
     """Run Mootdx download phase."""
     print("\n" + "=" * 70)
     print("Phase 1: Mootdx Data Download")
-    print("  - OHLCV market data")
+    if skip_ohlcv:
+        print("  - OHLCV skipped (handled by TDX bulk import)")
+    else:
+        print("  - OHLCV market data")
     print("  - Adjust factors (backward)")
     print("  - XDXR (ex-rights/ex-dividend)")
     if not skip_fundamentals:
@@ -188,6 +192,7 @@ def run_mootdx_download(
             skip_fundamentals=skip_fundamentals,
             download_dir=download_dir,
             refresh_fundamentals=refresh_fundamentals,
+            skip_ohlcv=skip_ohlcv,
         )
         return True
     except Exception as e:
@@ -274,6 +279,11 @@ Examples:
         action="store_true",
         help="Force re-download all financial data quarters",
     )
+    parser.add_argument(
+        "--skip-mootdx-ohlcv",
+        action="store_true",
+        help="Skip mootdx per-symbol OHLCV download",
+    )
 
     # TDX import options (mutually exclusive)
     tdx_group = parser.add_mutually_exclusive_group()
@@ -318,10 +328,14 @@ Examples:
 
     # Phase 1: Mootdx
     if args.source in ["mootdx", "all"]:
+        skip_mootdx_ohlcv = (
+            args.skip_mootdx_ohlcv or args.tdx_source is not None or args.tdx_download
+        )
         if not run_mootdx_download(
             skip_fundamentals=args.skip_fundamentals,
             download_dir=args.download_dir,
             refresh_fundamentals=args.refresh_fundamentals,
+            skip_ohlcv=skip_mootdx_ohlcv,
         ):
             success = False
 

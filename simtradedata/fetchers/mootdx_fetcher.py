@@ -176,9 +176,18 @@ class MootdxFetcher(BaseFetcher):
                     logger.debug(f"No daily data for {symbol}")
                     return pd.DataFrame()
                 if start_date[:4] >= current_year:
-                    df = df.drop(columns=["datetime"], errors="ignore")
-                    df = df.rename_axis("date").reset_index()
-                    df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
+                    if "datetime" in df.columns and "date" not in df.columns:
+                        df = df.rename(columns={"datetime": "date"})
+                    elif "datetime" in df.columns:
+                        df = df.drop(columns=["datetime"])
+                    elif "date" not in df.columns:
+                        df = df.rename_axis("date").reset_index()
+
+                    if "date" in df.columns:
+                        df["date"] = pd.to_datetime(df["date"])
+                        df = df[
+                            (df["date"] >= start_date) & (df["date"] <= end_date)
+                        ]
 
             # mootdx k() returns 'date' as both index and column; drop index
             df = df.reset_index(drop=True)

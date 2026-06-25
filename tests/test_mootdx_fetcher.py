@@ -29,6 +29,24 @@ class FakeQuotesClient:
         )
 
 
+class FakeQuotesClientWithDatetimeColumn:
+    def k(self, **_kwargs):
+        return pd.DataFrame()
+
+    def bars(self, **_kwargs):
+        return pd.DataFrame(
+            {
+                "datetime": ["2026-06-18"],
+                "open": [9.20],
+                "high": [9.25],
+                "low": [9.07],
+                "close": [9.09],
+                "volume": [836563.0],
+                "amount": [763280640.0],
+            }
+        )
+
+
 def test_fetch_daily_bars_drops_duplicate_volume_from_bars_fallback(monkeypatch):
     fetcher = MootdxFetcher()
     fetcher._client = FakeQuotesClient()
@@ -40,3 +58,16 @@ def test_fetch_daily_bars_drops_duplicate_volume_from_bars_fallback(monkeypatch)
     assert not df.empty
     assert df.columns.tolist().count("volume") == 1
     assert df.columns.is_unique
+
+
+def test_fetch_daily_bars_preserves_datetime_column_from_bars_fallback(monkeypatch):
+    fetcher = MootdxFetcher()
+    fetcher._client = FakeQuotesClientWithDatetimeColumn()
+    monkeypatch.setattr(fetcher, "_ensure_source_available", lambda: True)
+    monkeypatch.setattr(fetcher, "_ensure_client", lambda: None)
+
+    df = fetcher.fetch_daily_bars("600000.SS", "2026-06-18", "2026-06-25")
+
+    assert not df.empty
+    assert "date" in df.columns
+    assert df["date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-06-18"]

@@ -73,7 +73,7 @@ def test_integrity_passes_when_active_cn_stocks_are_complete(tmp_path):
     assert report["stocks"]["latest_count"] == 2
     assert report["valuation"]["latest_count"] == 2
     assert report["delisted_missing_valuation"] == 1
-    assert report["anomalies"]["non_standard_prefix_symbols"] == ["302132.SZ"]
+    assert report["anomalies"]["non_standard_prefix_symbols"] == []
 
 
 def test_integrity_handles_legacy_metadata_without_security_type(tmp_path):
@@ -86,6 +86,125 @@ def test_integrity_handles_legacy_metadata_without_security_type(tmp_path):
     assert report["active_symbols"] == 2
     assert report["stocks"]["latest_count"] == 2
     assert report["valuation"]["latest_count"] == 2
+
+
+def test_integrity_allows_halted_active_stock_to_be_stale(tmp_path):
+    db_path = tmp_path / "cn.duckdb"
+    create_db(db_path)
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("DELETE FROM stocks WHERE symbol = '000001.SZ'")
+        conn.execute("DELETE FROM valuation WHERE symbol = '000001.SZ'")
+        conn.execute("INSERT INTO stocks VALUES ('000001.SZ', '2026-06-23')")
+        conn.execute("INSERT INTO valuation VALUES ('000001.SZ', '2026-06-23')")
+        conn.execute(
+            """
+            CREATE TABLE stock_status (
+                date VARCHAR NOT NULL,
+                status_type VARCHAR NOT NULL,
+                symbols VARCHAR NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO stock_status VALUES (?, ?, ?)",
+            ["20260624", "HALT", json.dumps(["000001.SZ"])],
+        )
+    finally:
+        conn.close()
+
+    report = check_integrity(str(db_path), target_date="2026-06-24")
+
+    assert report["status"] == "pass"
+    assert report["stocks"]["latest_count"] == 2
+    assert report["valuation"]["latest_count"] == 2
+
+
+def test_integrity_excludes_delisted_name_with_placeholder_delisted_date(tmp_path):
+    db_path = tmp_path / "cn.duckdb"
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE stocks (symbol VARCHAR NOT NULL, date DATE NOT NULL)")
+        conn.execute(
+            "CREATE TABLE valuation (symbol VARCHAR NOT NULL, date DATE NOT NULL)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE stock_metadata (
+                symbol VARCHAR NOT NULL,
+                stock_name VARCHAR,
+                de_listed_date DATE,
+                security_type VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO stock_metadata VALUES (?, ?, ?, ?)",
+            [
+                ("000001.SZ", "平安银行", "2900-01-01", "1"),
+                ("688287.SS", "退市观典", "2900-01-01", "1"),
+            ],
+        )
+        conn.execute("INSERT INTO stocks VALUES ('000001.SZ', '2026-06-24')")
+        conn.execute("INSERT INTO valuation VALUES ('000001.SZ', '2026-06-24')")
+    finally:
+        conn.close()
+
+    report = check_integrity(str(db_path), target_date="2026-06-24")
+
+    assert report["status"] == "pass"
+    assert report["active_symbols"] == 1
+
+
+def test_integrity_excludes_metadata_not_seen_in_latest_stock_pool(tmp_path):
+    db_path = tmp_path / "cn.duckdb"
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE stocks (symbol VARCHAR NOT NULL, date DATE NOT NULL)")
+        conn.execute(
+            "CREATE TABLE valuation (symbol VARCHAR NOT NULL, date DATE NOT NULL)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE stock_metadata (
+                symbol VARCHAR NOT NULL,
+                de_listed_date DATE,
+                security_type VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE stock_pool (
+                symbol VARCHAR NOT NULL,
+                first_seen_date DATE,
+                last_seen_date DATE
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO stock_metadata VALUES (?, ?, ?)",
+            [
+                ("000001.SZ", "2900-01-01", "1"),
+                ("000638.SZ", "2900-01-01", "1"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO stock_pool VALUES (?, ?, ?)",
+            [
+                ("000001.SZ", "2026-01-01", "2026-06-24"),
+                ("000638.SZ", "2026-01-01", "2026-06-01"),
+            ],
+        )
+        conn.execute("INSERT INTO stocks VALUES ('000001.SZ', '2026-06-24')")
+        conn.execute("INSERT INTO valuation VALUES ('000001.SZ', '2026-06-24')")
+    finally:
+        conn.close()
+
+    report = check_integrity(str(db_path), target_date="2026-06-24")
+
+    assert report["status"] == "pass"
+    assert report["active_symbols"] == 1
 
 
 def test_integrity_fails_when_active_cn_valuation_is_missing(tmp_path):

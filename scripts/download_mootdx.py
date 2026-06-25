@@ -42,6 +42,7 @@ END_DATE = None  # None means current date
 
 # Batch size for stock processing
 BATCH_SIZE = 20
+LATEST_COVERAGE_SKIP_RATIO = 0.95
 
 # Ensure log directory exists
 Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
@@ -56,6 +57,17 @@ logger = logging.getLogger(__name__)
 
 # Prevent infinite hangs on TDX server socket recv()
 socket.setdefaulttimeout(30)
+
+
+def _latest_stock_coverage(
+    current_symbols: set[str], stock_pool: list[str]
+) -> tuple[int, int, float]:
+    stock_set = set(stock_pool)
+    total = len(stock_set)
+    if total == 0:
+        return 0, 0, 0.0
+    latest_count = len(stock_set & current_symbols)
+    return latest_count, total, latest_count / total
 
 
 class MootdxDownloader:
@@ -99,7 +111,11 @@ class MootdxDownloader:
         return START_DATE
 
     def download_stock_data(
-        self, symbol: str, start_date: str, end_date: str
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        include_ohlcv: bool = True,
     ) -> bool:
         """
         Download daily OHLCV + adjust factor + XDXR for a single stock.
@@ -118,32 +134,39 @@ class MootdxDownloader:
             actual_start = self.get_incremental_start_date(symbol)
             ohlcv_start = max(actual_start, start_date)
 
-            if ohlcv_start <= end_date:
-                df = self.unified_fetcher.fetch_daily_data(
-                    symbol, ohlcv_start, end_date
-                )
-
-                if not df.empty:
-                    # Filter out empty rows (halted stocks return rows with all NaN)
-                    price_cols = ["open", "high", "low", "close"]
-                    available_cols = [c for c in price_cols if c in df.columns]
-                    if available_cols:
-                        df = df.dropna(subset=available_cols, how="all")
+            if include_ohlcv and ohlcv_start <= end_date:
+                try:
+                    df = self.unified_fetcher.fetch_daily_data(
+                        symbol, ohlcv_start, end_date
+                    )
 
                     if not df.empty:
-                        if "date" in df.columns:
-                            market_df = df.set_index("date")
-                        else:
-                            market_df = df
+                        # Filter out empty rows (halted stocks return rows with all NaN)
+                        price_cols = ["open", "high", "low", "close"]
+                        available_cols = [c for c in price_cols if c in df.columns]
+                        if available_cols:
+                            df = df.dropna(subset=available_cols, how="all")
 
-                        if "amount" in market_df.columns:
-                            market_df = market_df.rename(
-                                columns={"amount": "money"}
-                            )
+                        if not df.empty:
+                            if "date" in df.columns:
+                                market_df = df.set_index("date")
+                            else:
+                                market_df = df
 
-                        self.writer.write_market_data(symbol, market_df)
-                        downloaded = True
+                            if "amount" in market_df.columns:
+                                market_df = market_df.rename(
+                                    columns={"amount": "money"}
+                                )
 
+                            self.writer.write_market_data(symbol, market_df)
+                            downloaded = True
+                except (socket.timeout, ConnectionError):
+                    logger.warning(
+                        f"Connection error fetching OHLCV for {symbol}, reconnecting"
+                    )
+                    self._reconnect()
+                except Exception as e:
+                    logger.warning(f"Failed to fetch OHLCV for {symbol}: {e}")
 
             # --- XDXR: download if missing or suspiciously sparse for this symbol ---
             exr_max = self.writer.get_max_date("exrights", symbol)
@@ -257,7 +280,12 @@ class MootdxDownloader:
         return result
 
     def download_batch(
-        self, stock_batch: list, start_date: str, end_date: str, pbar=None
+        self,
+        stock_batch: list,
+        start_date: str,
+        end_date: str,
+        pbar=None,
+        include_ohlcv: bool = True,
     ) -> int:
         """Download data for a batch of stocks in a single transaction."""
         success_count = 0
@@ -266,7 +294,9 @@ class MootdxDownloader:
         try:
             for stock in stock_batch:
                 try:
-                    if self.download_stock_data(stock, start_date, end_date):
+                    if self.download_stock_data(
+                        stock, start_date, end_date, include_ohlcv=include_ohlcv
+                    ):
                         success_count += 1
                 except Exception as e:
                     logger.error(f"Exception downloading {stock}: {e}")
@@ -602,6 +632,7 @@ def download_all_data(
     start_date: str = None,
     download_dir: str = None,
     refresh_fundamentals: bool = False,
+    skip_ohlcv: bool = False,
 ):
     """
     Main mootdx download function.
@@ -613,6 +644,8 @@ def download_all_data(
         print("SimTradeData Download (mootdx Source)")
         print("=" * 70)
         print("Mode: Auto-incremental (queries MAX(date) per symbol)")
+        if skip_ohlcv:
+            print("OHLCV: Skipped (expected to be handled by TDX bulk import)")
         if skip_fundamentals:
             print("Fundamentals: Skipped")
         print("=" * 70)
@@ -640,17 +673,43 @@ def download_all_data(
         downloader.unified_fetcher.login()
 
         try:
+            # Get stock list from mootdx
+            print("\nFetching stock list from mootdx...")
+            stock_pool = downloader.unified_fetcher.fetch_stock_list()
+            print(f"Total stocks: {len(stock_pool)}")
+
+            if not stock_pool and not skip_ohlcv:
+                print("Error: No stocks found")
+                return
+
             # Check if stocks data is already up to date
             global_max_date = downloader.writer.get_max_date("stocks")
-            skip_stock_download = False
+            skip_stock_download = skip_ohlcv
             extras_stock_pool = None
-            if global_max_date:
+            if skip_ohlcv:
+                missing = downloader.writer.conn.execute("""
+                    SELECT DISTINCT s.symbol FROM stocks s
+                    LEFT JOIN (SELECT DISTINCT symbol FROM exrights) x
+                        ON s.symbol = x.symbol
+                    WHERE x.symbol IS NULL
+                    ORDER BY s.symbol
+                """).fetchall()
+                extras_stock_pool = [row[0] for row in missing]
+                print(
+                    f"\nSkipping mootdx OHLCV; extras need coverage for "
+                    f"{len(extras_stock_pool)} symbols"
+                )
+            elif global_max_date:
                 # Check if there's any new trading day since global_max_date
                 # by fetching a single stock's data for the date range
                 try:
+                    next_date = (
+                        datetime.strptime(global_max_date, "%Y-%m-%d")
+                        + timedelta(days=1)
+                    ).strftime("%Y-%m-%d")
                     test_df = downloader.unified_fetcher.fetch_daily_data(
                         "000001.SZ",
-                        (datetime.strptime(global_max_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d"),
+                        next_date,
                         end_date_str,
                     )
                 except Exception as e:
@@ -658,49 +717,68 @@ def download_all_data(
                     test_df = pd.DataFrame()
 
                 if test_df.empty:
-                    # OHLCV is current (or test fetch failed), check exrights coverage
-                    stock_count = downloader.writer.conn.execute(
-                        "SELECT COUNT(DISTINCT symbol) FROM stocks"
-                    ).fetchone()[0]
-                    exr_count = downloader.writer.conn.execute(
-                        "SELECT COUNT(DISTINCT symbol) FROM exrights"
-                    ).fetchone()[0]
+                    current_rows = downloader.writer.conn.execute(
+                        "SELECT DISTINCT symbol FROM stocks WHERE date = ?",
+                        [global_max_date],
+                    ).fetchall()
+                    current_symbols = {row[0] for row in current_rows}
+                    latest_count, total_count, latest_ratio = _latest_stock_coverage(
+                        current_symbols, stock_pool
+                    )
 
-                    if exr_count >= stock_count * 0.9:
-                        print(f"\nStocks data already up to date (max_date: {global_max_date})")
-                        print(f"Exrights coverage: {exr_count}/{stock_count} stocks")
-                        print("No new trading days since last update, skipping stock download.")
-                        skip_stock_download = True
-                    else:
-                        # Only process stocks missing exrights
-                        missing = downloader.writer.conn.execute("""
-                            SELECT DISTINCT s.symbol FROM stocks s
-                            LEFT JOIN (SELECT DISTINCT symbol FROM exrights) x
-                                ON s.symbol = x.symbol
-                            WHERE x.symbol IS NULL
-                        """).fetchall()
-                        extras_stock_pool = [row[0] for row in missing]
-                        from simtradedata.utils.code_utils import is_etf_code
-                        etf_count = sum(1 for s in extras_stock_pool if is_etf_code(s))
-                        print(f"\nOHLCV up to date (max_date: {global_max_date})")
+                    if latest_ratio < LATEST_COVERAGE_SKIP_RATIO:
                         print(
-                            f"But exrights incomplete ({exr_count}/{stock_count}), "
-                            f"downloading extras..."
+                            f"\nOHLCV incomplete at max_date {global_max_date}: "
+                            f"{latest_count}/{total_count} symbols current "
+                            f"({latest_ratio:.1%}), downloading missing rows..."
                         )
-                        print(f"  Missing: {len(extras_stock_pool)} "
-                              f"({etf_count} ETFs, {len(extras_stock_pool) - etf_count} stocks)")
-                        skip_stock_download = True
+                    else:
+                        # OHLCV is current, check exrights coverage.
+                        stock_count = downloader.writer.conn.execute(
+                            "SELECT COUNT(DISTINCT symbol) FROM stocks"
+                        ).fetchone()[0]
+                        exr_count = downloader.writer.conn.execute(
+                            "SELECT COUNT(DISTINCT symbol) FROM exrights"
+                        ).fetchone()[0]
+
+                        if exr_count >= stock_count * 0.9:
+                            print(
+                                "\nStocks data already up to date "
+                                f"(max_date: {global_max_date})"
+                            )
+                            print(f"Exrights coverage: {exr_count}/{stock_count} stocks")
+                            print(
+                                "No new trading days since last update, "
+                                "skipping stock download."
+                            )
+                            skip_stock_download = True
+                        else:
+                            # Only process stocks missing exrights
+                            missing = downloader.writer.conn.execute("""
+                                SELECT DISTINCT s.symbol FROM stocks s
+                                LEFT JOIN (SELECT DISTINCT symbol FROM exrights) x
+                                    ON s.symbol = x.symbol
+                                WHERE x.symbol IS NULL
+                            """).fetchall()
+                            extras_stock_pool = [row[0] for row in missing]
+                            from simtradedata.utils.code_utils import is_etf_code
+
+                            etf_count = sum(
+                                1 for s in extras_stock_pool if is_etf_code(s)
+                            )
+                            print(f"\nOHLCV up to date (max_date: {global_max_date})")
+                            print(
+                                f"But exrights incomplete ({exr_count}/{stock_count}), "
+                                f"downloading extras..."
+                            )
+                            print(
+                                f"  Missing: {len(extras_stock_pool)} "
+                                f"({etf_count} ETFs, "
+                                f"{len(extras_stock_pool) - etf_count} stocks)"
+                            )
+                            skip_stock_download = True
 
             if not skip_stock_download:
-                # Get stock list from mootdx
-                print("\nFetching stock list from mootdx...")
-                stock_pool = downloader.unified_fetcher.fetch_stock_list()
-                print(f"Total stocks: {len(stock_pool)}")
-
-                if not stock_pool:
-                    print("Error: No stocks found")
-                    return
-
                 # Resume: prioritize stocks needing backfill
                 if global_max_date:
                     result = downloader.writer.conn.execute(
@@ -712,8 +790,10 @@ def download_all_data(
                     already_current = [s for s in stock_pool if s in current_symbols]
                     if already_current:
                         stock_pool = needs_work + already_current
-                        print(f"  Resume: {len(needs_work)} need download, "
-                              f"{len(already_current)} already have latest data")
+                        print(
+                            f"  Resume: {len(needs_work)} need download, "
+                            f"{len(already_current)} already have latest data"
+                        )
 
                 # Download in batches
                 batches = [
@@ -721,7 +801,9 @@ def download_all_data(
                     for i in range(0, len(stock_pool), BATCH_SIZE)
                 ]
 
-                print(f"\nProcessing {len(stock_pool)} stocks in {len(batches)} batches...")
+                print(
+                    f"\nProcessing {len(stock_pool)} stocks in {len(batches)} batches..."
+                )
                 print(f"Batch size: {BATCH_SIZE}")
                 print("=" * 60)
 
@@ -770,7 +852,11 @@ def download_all_data(
                     for batch in batches:
                         try:
                             success = downloader.download_batch(
-                                batch, start_date_str, end_date_str, pbar
+                                batch,
+                                start_date_str,
+                                end_date_str,
+                                pbar,
+                                include_ohlcv=False,
                             )
                             total_success += success
                         except Exception as e:
@@ -883,6 +969,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Force re-download all financial data quarters",
     )
+    parser.add_argument(
+        "--skip-ohlcv",
+        action="store_true",
+        help="Skip mootdx per-symbol OHLCV download",
+    )
 
     args = parser.parse_args()
 
@@ -891,4 +982,5 @@ if __name__ == "__main__":
         start_date=args.start_date,
         download_dir=args.download_dir,
         refresh_fundamentals=args.refresh_fundamentals,
+        skip_ohlcv=args.skip_ohlcv,
     )

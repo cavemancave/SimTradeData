@@ -30,7 +30,7 @@ CN_FALLBACK_PREFIXES = {
     "688",
     "689",
 }
-CN_STANDARD_PREFIXES = CN_FALLBACK_PREFIXES - {"302"}
+CN_STANDARD_PREFIXES = CN_FALLBACK_PREFIXES
 
 
 def _json_default(value: Any) -> str:
@@ -62,6 +62,12 @@ def _is_active(de_listed_date: Any, target_date: str) -> bool:
     if not text or text.lower() in {"none", "null", "nat"}:
         return True
     return text > target_date
+
+
+def _is_delisted_name(stock_name: Any) -> bool:
+    if stock_name is None:
+        return False
+    return str(stock_name).strip("\x00").startswith("退市")
 
 
 def _table_exists(conn: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -124,14 +130,31 @@ def _active_cn_symbols(
     target_date: str,
 ) -> tuple[list[str], list[str]]:
     """Return active CN stock symbols and non-standard active symbols."""
+    current_pool = None
+    if _table_exists(conn, "stock_pool"):
+        stock_pool_columns = _table_columns(conn, "stock_pool")
+        if "last_seen_date" in stock_pool_columns:
+            current_pool = {
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT symbol FROM stock_pool
+                    WHERE last_seen_date >= ?
+                    """,
+                    [target_date],
+                ).fetchall()
+            }
+
     if _table_exists(conn, "stock_metadata"):
         metadata_columns = _table_columns(conn, "stock_metadata")
         security_type_expr = (
             "security_type" if "security_type" in metadata_columns else "NULL"
         )
+        stock_name_expr = "stock_name" if "stock_name" in metadata_columns else "NULL"
         rows = conn.execute(
             f"""
-            SELECT symbol, de_listed_date, {security_type_expr} AS security_type
+            SELECT symbol, de_listed_date, {security_type_expr} AS security_type,
+                   {stock_name_expr} AS stock_name
             FROM stock_metadata
             ORDER BY symbol
             """
@@ -140,8 +163,12 @@ def _active_cn_symbols(
 
         symbols = []
         anomalies = []
-        for symbol, de_listed_date, security_type in rows:
+        for symbol, de_listed_date, security_type, stock_name in rows:
             if not _is_active(de_listed_date, target_date):
+                continue
+            if _is_delisted_name(stock_name):
+                continue
+            if current_pool is not None and symbol not in current_pool:
                 continue
             if has_security_type:
                 if security_type != "1":
@@ -179,6 +206,7 @@ def _symbols_latest_status(
     table: str,
     symbols: list[str],
     target_date: str,
+    allow_stale_symbols: set[str] | None = None,
 ) -> dict[str, Any]:
     if not symbols or not _table_exists(conn, table):
         return {
@@ -199,10 +227,13 @@ def _symbols_latest_status(
         ).fetchall()
     }
     missing = [symbol for symbol in symbols if symbol not in latest_by_symbol]
+    allow_stale_symbols = allow_stale_symbols or set()
     stale = [
         {"symbol": symbol, "max_date": latest_by_symbol[symbol]}
         for symbol in symbols
-        if symbol in latest_by_symbol and latest_by_symbol[symbol] != target_date
+        if symbol in latest_by_symbol
+        and latest_by_symbol[symbol] != target_date
+        and symbol not in allow_stale_symbols
     ]
     latest_count = len(symbols) - len(missing) - len(stale)
     return {
@@ -210,6 +241,33 @@ def _symbols_latest_status(
         "missing": missing,
         "stale": stale,
     }
+
+
+def _halted_symbols_on(
+    conn: duckdb.DuckDBPyConnection,
+    target_date: str,
+) -> set[str]:
+    if not _table_exists(conn, "stock_status"):
+        return set()
+
+    date_key = target_date.replace("-", "")
+    rows = conn.execute(
+        """
+        SELECT symbols FROM stock_status
+        WHERE date=? AND status_type='HALT'
+        """,
+        [date_key],
+    ).fetchall()
+    halted = set()
+    for (symbols_json,) in rows:
+        if not symbols_json:
+            continue
+        try:
+            symbols = json.loads(symbols_json)
+        except json.JSONDecodeError:
+            continue
+        halted.update(symbol for symbol in symbols if isinstance(symbol, str))
+    return halted
 
 
 def _symbols_coverage_status(
@@ -413,6 +471,7 @@ def check_integrity(
             return report
 
         symbols, anomaly_symbols = _stock_universe(conn, market, target_date)
+        halted_symbols = _halted_symbols_on(conn, target_date) if market == "cn" else set()
         report["active_symbols"] = len(symbols)
         report["anomalies"] = {
             "non_standard_prefix_symbols": anomaly_symbols[:max_examples],
@@ -425,7 +484,13 @@ def check_integrity(
             actual=len(symbols),
         )
 
-        stock_status = _symbols_latest_status(conn, "stocks", symbols, target_date)
+        stock_status = _symbols_latest_status(
+            conn,
+            "stocks",
+            symbols,
+            target_date,
+            allow_stale_symbols=halted_symbols,
+        )
         report["stocks"] = stock_status
         _add_check(
             checks,
@@ -441,7 +506,11 @@ def check_integrity(
 
         if market == "cn":
             valuation_status = _symbols_latest_status(
-                conn, "valuation", symbols, target_date
+                conn,
+                "valuation",
+                symbols,
+                target_date,
+                allow_stale_symbols=halted_symbols,
             )
             report["valuation"] = valuation_status
             _add_check(
