@@ -323,6 +323,8 @@ class TdxDayImporter:
             else:
                 if not df_backfill.empty:
                     self.stats["records_backfilled"] += len(df_backfill)
+                if not df_mid.empty:
+                    self.stats["records_backfilled"] += len(df_mid)
                 df = pd.concat([df_backfill, df_mid, df_new], ignore_index=True)
 
         # Set date as index for writer

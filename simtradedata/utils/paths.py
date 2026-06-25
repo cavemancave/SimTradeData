@@ -5,6 +5,7 @@ Project path management
 Provides unified path access for all project code.
 """
 
+import shutil
 from pathlib import Path
 
 
@@ -45,4 +46,20 @@ STRATEGIES_PATH = get_strategies_path()
 # DuckDB database paths
 DUCKDB_PATH = DATA_PATH / "cn.duckdb"
 US_DUCKDB_PATH = DATA_PATH / "us.duckdb"
+
+
+def safe_rmtree(path: Path) -> None:
+    """Remove a directory tree with basic safety guards.
+
+    Refuses to delete top-level system paths to prevent catastrophic
+    data loss from misconfigured output directories.
+    """
+    resolved = path.resolve()
+    dangerous = {Path("/"), Path.home()}
+    if resolved in dangerous or len(resolved.parts) <= 2:
+        raise ValueError(
+            f"Refusing to delete unsafe path: {resolved}. "
+            f"Check output_dir configuration."
+        )
+    shutil.rmtree(path)
 

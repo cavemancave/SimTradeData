@@ -57,6 +57,8 @@ def quarter_end_date(year: int, quarter: int) -> str:
     Returns:
         Date string like '2024-03-31'
     """
+    if not 1 <= quarter <= 4:
+        raise ValueError(f"Quarter must be 1-4, got {quarter}")
     month = quarter * 3
     day = 31 if month in (3, 12) else 30
     return f"{year}-{month:02d}-{day:02d}"

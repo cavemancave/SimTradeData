@@ -9,7 +9,6 @@ with automatic upsert (INSERT OR REPLACE) for deduplication.
 import hashlib
 import json
 import logging
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -17,7 +16,8 @@ from typing import List, Optional
 import duckdb
 import pandas as pd
 
-from simtradedata.utils.paths import DUCKDB_PATH
+from simtradedata.config.field_mappings import BENCHMARK_CONFIG
+from simtradedata.utils.paths import DUCKDB_PATH, safe_rmtree
 from simtradedata.validators.data_validator import validate_before_write
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,24 @@ class DuckDBWriter:
         "OR symbol LIKE '603___.SS' OR symbol LIKE '605___.SS' "
         "OR symbol LIKE '688___.SS' OR symbol LIKE '689___.SS')"
     )
+
+    _ALLOWED_TABLES = frozenset({
+        "stocks", "valuation", "fundamentals", "exrights",
+        "stock_metadata", "stock_pool", "stock_status",
+        "benchmark", "trade_days", "index_constituents",
+        "money_flow", "lhb", "margin_trading",
+        "data_change_log", "version_info", "fundamentals_progress",
+        "sampled_dates",
+    })
+
+    @staticmethod
+    def _check_table(table: str) -> None:
+        """Validate table name to prevent SQL injection via f-string interpolation."""
+        if table not in DuckDBWriter._ALLOWED_TABLES:
+            raise ValueError(
+                f"Unknown table '{table}'. Allowed: "
+                f"{sorted(DuckDBWriter._ALLOWED_TABLES)}"
+            )
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = Path(db_path)
@@ -977,6 +995,7 @@ class DuckDBWriter:
 
     def get_max_date(self, table: str, symbol: str = None) -> Optional[str]:
         """Get maximum date for incremental update"""
+        self._check_table(table)
         if symbol:
             result = self.conn.execute(
                 f"""
@@ -995,6 +1014,7 @@ class DuckDBWriter:
 
     def get_min_date(self, table: str, symbol: str = None) -> Optional[str]:
         """Get minimum date for backfill detection"""
+        self._check_table(table)
         if symbol:
             result = self.conn.execute(
                 f"""
@@ -1013,6 +1033,7 @@ class DuckDBWriter:
 
     def get_existing_stocks(self, table: str = "stocks") -> List[str]:
         """Get list of symbols in database"""
+        self._check_table(table)
         result = self.conn.execute(f"""
             SELECT DISTINCT symbol FROM {table}
         """).fetchall()
@@ -1050,6 +1071,7 @@ class DuckDBWriter:
         return status
 
     def _get_table_summary(self, table: str) -> dict:
+        self._check_table(table)
         """Get row count, stock count, and date range for a symbol-based table."""
         try:
             result = self.conn.execute(f"""
@@ -1070,6 +1092,7 @@ class DuckDBWriter:
             return {"rows": 0, "stocks": 0, "min_date": None, "max_date": None}
 
     def _get_table_summary_simple(self, table: str) -> dict:
+        self._check_table(table)
         """Get row count for a non-symbol table."""
         try:
             result = self.conn.execute(f"""
@@ -1161,22 +1184,6 @@ class DuckDBWriter:
     # Export to Parquet
     # ========================================
 
-    @staticmethod
-    def _safe_rmtree(path: Path) -> None:
-        """Remove a directory tree with basic safety guards.
-
-        Refuses to delete top-level system paths to prevent catastrophic
-        data loss from misconfigured output directories.
-        """
-        resolved = path.resolve()
-        dangerous = {Path("/"), Path.home()}
-        if resolved in dangerous or len(resolved.parts) <= 2:
-            raise ValueError(
-                f"Refusing to delete unsafe path: {resolved}. "
-                f"Check output_dir configuration."
-            )
-        shutil.rmtree(path)
-
     def export_to_parquet(self, output_dir: str, market: str = "cn") -> None:
         """Export all data to PTrade Parquet format"""
         output_path = Path(output_dir)
@@ -1186,7 +1193,7 @@ class DuckDBWriter:
 
         # Clean output directory to avoid mixing data from different markets
         if output_path.exists():
-            self._safe_rmtree(output_path)
+            safe_rmtree(output_path)
 
         for subdir in ["stocks", "exrights", "fundamentals", "valuation", "metadata"]:
             (output_path / subdir).mkdir(parents=True, exist_ok=True)
@@ -1220,7 +1227,7 @@ class DuckDBWriter:
         """Export changed rows for client-side delta merge."""
         output_path = Path(output_dir)
         if output_path.exists():
-            self._safe_rmtree(output_path)
+            safe_rmtree(output_path)
 
         output_path.mkdir(parents=True, exist_ok=True)
         target_version = target_version or self.get_max_date("stocks")
@@ -1284,7 +1291,7 @@ class DuckDBWriter:
 
         if not changed_tables:
             # Clean up empty output directory before raising
-            self._safe_rmtree(output_path)
+            safe_rmtree(output_path)
             raise ValueError("no changed rows for delta export")
 
         self._write_delta_version_file(metadata_dir, target_version, market)
@@ -1906,7 +1913,7 @@ class DuckDBWriter:
     def _copy_delta_benchmark(
         self, output_dir: Path, base_version: str, target_version: str
     ) -> int:
-        benchmark_symbol = "000300.SS"
+        benchmark_symbol = BENCHMARK_CONFIG["default_index"]
         rows = self.conn.execute("""
             SELECT COUNT(*) FROM stocks
             WHERE symbol = ? AND date > ?::DATE AND date <= ?::DATE
@@ -2865,7 +2872,7 @@ class DuckDBWriter:
 
         # benchmark.parquet — prefer stocks table for full history,
         # fall back to benchmark table for recent data only
-        benchmark_symbol = '000300.SS'
+        benchmark_symbol = BENCHMARK_CONFIG["default_index"]
         has_stocks_benchmark = self.conn.execute(
             f"SELECT COUNT(*) FROM stocks WHERE symbol = '{benchmark_symbol}'"
         ).fetchone()[0]

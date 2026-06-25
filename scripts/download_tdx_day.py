@@ -124,6 +124,16 @@ def download_file(url: str, dest_path: Path, show_progress: bool = True) -> bool
                             break
                         f.write(chunk)
 
+            # Verify download size matches Content-Length
+            downloaded_size = temp_path.stat().st_size
+            if total_size and downloaded_size != total_size:
+                temp_path.unlink(missing_ok=True)
+                logger.error(
+                    "Download size mismatch for %s: expected %d, got %d",
+                    url, total_size, downloaded_size,
+                )
+                return False
+
             # Move temp file to final destination
             temp_path.rename(dest_path)
             return True

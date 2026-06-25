@@ -380,6 +380,14 @@ def download_us_data(
                 return
             print(f"Total stocks: {len(stock_list)}")
 
+            # Pre-fetch stocks with existing fundamentals/valuation (batch, not per-symbol)
+            has_fund = {r[0] for r in downloader.writer.conn.execute(
+                "SELECT DISTINCT symbol FROM fundamentals"
+            ).fetchall()}
+            has_meta = {r[0] for r in downloader.writer.conn.execute(
+                "SELECT DISTINCT symbol FROM valuation"
+            ).fetchall()}
+
             # Filter stocks needing OHLCV update
             needs_ohlcv = []
             already_current = []
@@ -391,10 +399,9 @@ def download_us_data(
                     already_current.append(sym)
                 else:
                     needs_ohlcv.append(sym)
-                # Track stocks that have never had fundamentals/metadata downloaded
-                if not downloader.writer.get_max_date("fundamentals", sym):
+                if sym not in has_fund:
                     needs_fundamentals.append(sym)
-                if not downloader.writer.get_max_date("valuation", sym):
+                if sym not in has_meta:
                     needs_metadata.append(sym)
 
             if already_current:

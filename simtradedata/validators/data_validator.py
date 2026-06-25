@@ -71,13 +71,21 @@ class MarketDataValidator:
             logger.error(msg)
             return False
 
+        # 3b. Check dates are monotonically increasing
+        if not df.index.is_monotonic_increasing:
+            msg = f"{symbol}: Dates are not monotonically increasing"
+            if strict:
+                raise DataQualityError(msg)
+            logger.warning(msg)
+
         # 4. Value range checks
         issues = []
 
-        # Close price should be positive
-        if (df["close"] <= 0).any():
-            invalid_count = (df["close"] <= 0).sum()
-            issues.append(f"{invalid_count} non-positive close prices")
+        # OHLC prices should be positive
+        for field in ["open", "high", "low", "close"]:
+            if field in df.columns and (df[field] <= 0).any():
+                invalid_count = (df[field] <= 0).sum()
+                issues.append(f"{invalid_count} non-positive {field} prices")
 
         # High >= Low
         if (df["high"] < df["low"]).any():
@@ -178,7 +186,16 @@ class ValuationDataValidator:
         if issues:
             msg = f"{symbol}: Valuation data issues: {'; '.join(issues)}"
             logger.warning(msg)
-            # Don't fail on valuation issues, just warn
+
+        # Check for excessive NaN values
+        nan_pct = df.isna().sum() / len(df) * 100
+        high_nan_fields = nan_pct[nan_pct > 10].to_dict()
+        if high_nan_fields:
+            logger.warning(
+                "%s: High NaN percentage in valuation: %s",
+                symbol,
+                ", ".join(f"{k}={v:.1f}%" for k, v in high_nan_fields.items()),
+            )
 
         logger.debug(f"{symbol}: Valuation data validation passed")
         return True

@@ -64,7 +64,7 @@ def is_retryable(error: BaseException) -> bool:
     return any(keyword in message for keyword in RETRYABLE_KEYWORDS)
 
 
-@dataclass
+@dataclass(frozen=True)
 class RetryConfig:
     """Configuration for retry behavior.
 
