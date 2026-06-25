@@ -10,6 +10,8 @@ subclasses get automatic request tracking and protection.
 import logging
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from typing import Generator
 
 from simtradedata.resilience.circuit_breaker import CircuitBreaker
 from simtradedata.resilience.cooldown import cooldown_manager
@@ -192,6 +194,33 @@ class BaseFetcher(ABC):
             )
             self._circuit_breaker.record_failure()
             self._cooldown.record_failure(self.source_name, error_type)
+
+    @contextmanager
+    def _resilient_operation(self) -> Generator[bool, None, None]:
+        """Context manager wrapping multi-retry operations with resilience.
+
+        Handles pre-check (cooldown + circuit breaker) and post-recording
+        (monitor, circuit breaker, cooldown) automatically. Use in methods
+        that have their own internal retry loops.
+
+        Yields:
+            True if the operation should proceed, False if the source is
+            blocked (caller should return early with an empty result).
+        """
+        if not self._ensure_source_available():
+            yield False
+            return
+        start = time.monotonic()
+        try:
+            yield True
+            self._record_source_result(
+                success=True, elapsed=time.monotonic() - start,
+            )
+        except Exception as e:
+            self._record_source_result(
+                success=False, elapsed=time.monotonic() - start, error=e,
+            )
+            raise
 
     @staticmethod
     def _classify_error(error) -> str:

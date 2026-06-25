@@ -14,6 +14,7 @@ dependencies = [
     "pyarrow>=19.0.0,<20.0.0",
     "yfinance>=0.2.0",
     "lxml>=5.0.0",
+    "mootdx (>=0.11.7,<0.12.0)",
 ]
 
 # CLI entry points (run scripts directly with poetry run python scripts/xxx.py)
@@ -41,3 +42,4 @@ joblib = "^1.5.2"
 baostock = "^0.9.1"
 jupyter = "^1.1.1"
 numpy = "<2"
+ruff = "^0.15.19"

@@ -251,13 +251,64 @@ class FundamentalDataValidator:
             logger.error(msg)
             return False
 
-        # 4. Check percentage of available data
+        # 4. Value range sanity checks
+        issues = []
+        if "roe" in df.columns:
+            roe = pd.to_numeric(df["roe"], errors="coerce")
+            extreme = (roe.abs() > 500).sum()
+            if extreme:
+                issues.append(f"{extreme} rows with |ROE| > 500%")
+        if "current_ratio" in df.columns:
+            current_ratio = pd.to_numeric(df["current_ratio"], errors="coerce")
+            invalid = (current_ratio < 0).sum()
+            if invalid:
+                issues.append(f"{invalid} rows with negative current_ratio")
+        if "debt_equity_ratio" in df.columns:
+            debt_equity_ratio = pd.to_numeric(df["debt_equity_ratio"], errors="coerce")
+            invalid = (debt_equity_ratio < -1).sum()
+            if invalid:
+                issues.append(f"{invalid} rows with debt_equity_ratio < -1")
+        if issues:
+            logger.warning("%s: Fundamental range issues: %s", symbol, "; ".join(issues))
+
+        # 5. Check percentage of available data
         data_pct = (non_nan_count / total_count) * 100
         if data_pct < 20:
             msg = f"{symbol}: Only {data_pct:.1f}% of fundamental data available"
             logger.warning(msg)
 
         logger.debug(f"{symbol}: Fundamental data validation passed")
+        return True
+
+
+class ExrightsDataValidator:
+    """Validator for ex-rights/dividend data"""
+
+    @staticmethod
+    def validate(df: pd.DataFrame, symbol: str, strict: bool = False) -> bool:
+        if df.empty:
+            return True  # no exrights events is valid (e.g., new IPO)
+
+        if not isinstance(df.index, pd.DatetimeIndex):
+            msg = f"{symbol}: Exrights index must be DatetimeIndex"
+            if strict:
+                raise DataQualityError(msg)
+            logger.error(msg)
+            return False
+
+        if df.index.has_duplicates:
+            dups = df.index[df.index.duplicated()].unique()
+            msg = f"{symbol}: Duplicate ex-dates: {dups.tolist()[:5]}"
+            if strict:
+                raise DataQualityError(msg)
+            logger.warning(msg)
+
+        # allotted_ps, rationed_ps, bonus_ps should be >= 0
+        for field in ("allotted_ps", "rationed_ps", "bonus_ps"):
+            if field in df.columns and (df[field] < 0).any():
+                count = (df[field] < 0).sum()
+                logger.warning("%s: %d negative %s values", symbol, count, field)
+
         return True
 
 
@@ -288,6 +339,8 @@ def validate_before_write(
         return ValuationDataValidator.validate(data, symbol, strict)
     elif data_type == "fundamental":
         return FundamentalDataValidator.validate(data, symbol, strict)
+    elif data_type == "exrights":
+        return ExrightsDataValidator.validate(data, symbol, strict)
     else:
         logger.warning(f"Unknown data type: {data_type}, skipping validation")
         return True

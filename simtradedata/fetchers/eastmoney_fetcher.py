@@ -331,6 +331,8 @@ class EastMoneyFetcher(BaseFetcher):
             DataFrame with columns: date, open, close, high, low,
             volume, amount, amplitude.
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         secid = self.to_secid(symbol)
         beg = start_date.replace("-", "")
         end = end_date.replace("-", "")
@@ -375,6 +377,8 @@ class EastMoneyFetcher(BaseFetcher):
             DataFrame with columns: date, net_main, net_super,
             net_large, net_medium, net_small.
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         secid = self.to_secid(symbol)
         beg = start_date.replace("-", "")
         end = end_date.replace("-", "")
@@ -421,6 +425,8 @@ class EastMoneyFetcher(BaseFetcher):
             DataFrame with columns: symbol, date, reason,
             net_buy, buy_amount, sell_amount.
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
         params = {
             "reportName": "RPT_DAILYBILLBOARD_DETAILSNEW",
@@ -469,6 +475,8 @@ class EastMoneyFetcher(BaseFetcher):
         Returns:
             DataFrame with columns: date, bonus_ps, allotted_ps.
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         code, _ = symbol.split(".")
 
         url = "https://datacenter-web.eastmoney.com/api/data/v1/get"

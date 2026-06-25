@@ -156,122 +156,112 @@ class UnifiedDataFetcher(BaoStockFetcher):
 
         logger.debug(f"Fetching unified data for {symbol}...")
 
-        # Pre-check resilience: skip if source is blocked
-        if not self._ensure_source_available():
-            logger.warning(
-                "Skipping %s: source '%s' is unavailable (cooldown or circuit open)",
-                symbol, self.source_name,
-            )
-            return pd.DataFrame()
-
-        operation_start = time.monotonic()
-
-        # Define API call function
-        def api_call():
-            return bs.query_history_k_data_plus(
-                bs_code,
-                fields_str,
-                start_date=start_date,
-                end_date=end_date,
-                frequency=frequency,
-                adjustflag=adjustflag,
-            )
-
-        # Retry loop for transient errors (timeout, server errors, encoding)
-        last_error = None
-        for attempt in range(MAX_API_RETRIES):
-            try:
-                rs = _run_with_timeout(
-                    api_call,
-                    60,
-                    f"BaoStock API timeout for {symbol}"
-                )
-            except TimeoutError:
-                last_error = TimeoutError(f"Timeout fetching {symbol}")
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
+        with self._resilient_operation() as ok:
+            if not ok:
                 logger.warning(
-                    f"Timeout for {symbol} (attempt {attempt + 1}/{MAX_API_RETRIES}), "
-                    f"retrying in {delay}s..."
+                    "Skipping %s: source '%s' is unavailable (cooldown or circuit open)",
+                    symbol, self.source_name,
                 )
-                time.sleep(delay)
-                continue
+                return pd.DataFrame()
 
-            # Check for login expiration
-            if rs.error_code != "0":
-                if "未登录" in rs.error_msg or "登录" in rs.error_msg:
-                    logger.warning("BaoStock session expired, re-login...")
-                    BaoStockFetcher._bs_logged_in = False
-                    BaoStockFetcher._ensure_login()
-                    continue  # retry with fresh session
+            # Define API call function
+            def api_call():
+                return bs.query_history_k_data_plus(
+                    bs_code,
+                    fields_str,
+                    start_date=start_date,
+                    end_date=end_date,
+                    frequency=frequency,
+                    adjustflag=adjustflag,
+                )
 
-                # Check for retryable server errors
-                if any(err in rs.error_msg for err in _RETRYABLE_ERRORS):
+            # Retry loop for transient errors
+            last_error = None
+            for attempt in range(MAX_API_RETRIES):
+                try:
+                    rs = _run_with_timeout(
+                        api_call, 60,
+                        f"BaoStock API timeout for {symbol}"
+                    )
+                except TimeoutError:
+                    last_error = TimeoutError(f"Timeout fetching {symbol}")
                     delay = RETRY_BASE_DELAY * (2 ** attempt)
                     logger.warning(
-                        f"Server error for {symbol}: {rs.error_msg} "
-                        f"(attempt {attempt + 1}/{MAX_API_RETRIES}), "
+                        f"Timeout for {symbol} (attempt {attempt + 1}/{MAX_API_RETRIES}), "
                         f"retrying in {delay}s..."
-                    )
-                    last_error = RuntimeError(
-                        f"Server error for {symbol}: {rs.error_msg}"
                     )
                     time.sleep(delay)
                     continue
 
-                # Non-retryable error
-                raise RuntimeError(
-                    f"Failed to query unified data for {symbol}: {rs.error_msg}"
-                )
+                # Check for login expiration
+                if rs.error_code != "0":
+                    if "未登录" in rs.error_msg or "登录" in rs.error_msg:
+                        logger.warning("BaoStock session expired, re-login...")
+                        BaoStockFetcher._bs_logged_in = False
+                        BaoStockFetcher._ensure_login()
+                        continue
 
-            # API call succeeded, try to parse data
-            try:
-                df = rs.get_data()
-            except UnicodeDecodeError as e:
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
-                logger.warning(
-                    f"Encoding error for {symbol}: {e} "
-                    f"(attempt {attempt + 1}/{MAX_API_RETRIES}), "
-                    f"retrying in {delay}s..."
-                )
-                last_error = e
-                time.sleep(delay)
-                continue
+                    if any(err in rs.error_msg for err in _RETRYABLE_ERRORS):
+                        delay = RETRY_BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            f"Server error for {symbol}: {rs.error_msg} "
+                            f"(attempt {attempt + 1}/{MAX_API_RETRIES}), "
+                            f"retrying in {delay}s..."
+                        )
+                        last_error = RuntimeError(
+                            f"Server error for {symbol}: {rs.error_msg}"
+                        )
+                        time.sleep(delay)
+                        continue
 
-            # Success - record in resilience systems
-            elapsed = time.monotonic() - operation_start
-            self._record_source_result(success=True, elapsed=elapsed)
-            break
-        else:
-            # All retries exhausted — record failure in resilience systems
-            elapsed = time.monotonic() - operation_start
-            self._record_source_result(
-                success=False, elapsed=elapsed, error=last_error,
-            )
-            if last_error:
-                logger.error(
-                    f"All {MAX_API_RETRIES} attempts failed for {symbol}: {last_error}"
-                )
-                raise last_error
-            raise RuntimeError(f"All retries failed for {symbol}")
+                    raise RuntimeError(
+                        f"Failed to query unified data for {symbol}: {rs.error_msg}"
+                    )
 
+                # Parse data
+                try:
+                    df_result = rs.get_data()
+                except UnicodeDecodeError as e:
+                    delay = RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        f"Encoding error for {symbol}: {e} "
+                        f"(attempt {attempt + 1}/{MAX_API_RETRIES}), "
+                        f"retrying in {delay}s..."
+                    )
+                    last_error = e
+                    time.sleep(delay)
+                    continue
+
+                # Success — context manager records the result
+                df = df_result
+                break
+            else:
+                if last_error:
+                    logger.error(
+                        f"All {MAX_API_RETRIES} attempts failed for {symbol}: {last_error}"
+                    )
+                    raise last_error
+                raise RuntimeError(f"All retries failed for {symbol}")
+
+        # Post-context-manager: process data
         if df.empty:
             logger.info(f"No unified data for {symbol} (may be delisted or no trading)")
             return pd.DataFrame()
-        
+
         # Convert data types
         df["date"] = pd.to_datetime(df["date"])
-        
+
         # Convert all numeric columns
         numeric_cols = [c for c in df.columns if c != "date"]
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-        
+
         logger.info(
             f"Fetched unified data for {symbol}: {len(df)} rows, "
             f"{len(df.columns)} fields"
         )
-        
+
         return df
 
     def fetch_index_data(
@@ -301,55 +291,35 @@ class UnifiedDataFetcher(BaoStockFetcher):
 
         logger.debug(f"Fetching index data for {index_code}...")
 
-        # Pre-check resilience: skip if source is blocked
-        if not self._ensure_source_available():
-            logger.warning(
-                "Skipping index %s: source '%s' is unavailable",
-                index_code, self.source_name,
-            )
-            return pd.DataFrame()
+        with self._resilient_operation() as ok:
+            if not ok:
+                logger.warning(
+                    "Skipping index %s: source '%s' is unavailable",
+                    index_code, self.source_name,
+                )
+                return pd.DataFrame()
 
-        operation_start = time.monotonic()
+            def api_call():
+                return bs.query_history_k_data_plus(
+                    bs_code, fields,
+                    start_date=start_date, end_date=end_date,
+                    frequency=frequency, adjustflag="3",
+                )
 
-        # Define API call function
-        def api_call():
-            return bs.query_history_k_data_plus(
-                bs_code,
-                fields,
-                start_date=start_date,
-                end_date=end_date,
-                frequency=frequency,
-                adjustflag="3"  # No adjustment for index
-            )
-
-        # Execute with 60 second timeout (cross-platform)
-        try:
             rs = _run_with_timeout(
-                api_call,
-                60,
+                api_call, 60,
                 f"BaoStock API timeout for index {index_code}"
             )
-        except TimeoutError:
-            elapsed = time.monotonic() - operation_start
-            self._record_source_result(success=False, elapsed=elapsed,
-                                       error=TimeoutError(f"Timeout fetching index {index_code}"))
-            logger.error(f"Timeout fetching index {index_code}, skipping")
-            raise
 
-        if rs.error_code != "0":
-            elapsed = time.monotonic() - operation_start
-            error = RuntimeError(
-                f"Failed to query index data for {index_code}: {rs.error_msg}"
-            )
-            self._record_source_result(success=False, elapsed=elapsed, error=error)
-            raise error
+            if rs.error_code != "0":
+                raise RuntimeError(
+                    f"Failed to query index data for {index_code}: {rs.error_msg}"
+                )
 
-        df = rs.get_data()
+            df = rs.get_data()
 
         if df.empty:
             logger.info(f"No index data for {index_code} (may be unavailable for date range)")
-            elapsed = time.monotonic() - operation_start
-            self._record_source_result(success=True, elapsed=elapsed)
             return pd.DataFrame()
 
         # Convert data types
@@ -362,8 +332,7 @@ class UnifiedDataFetcher(BaoStockFetcher):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Rename fields to match PTrade format using centralized mapping
-        # Only rename fields that exist in the DataFrame
+        # Rename fields to match PTrade format
         rename_map = {k: v for k, v in MARKET_FIELD_MAP.items() if k in df.columns}
         if rename_map:
             df = df.rename(columns=rename_map)
@@ -372,6 +341,4 @@ class UnifiedDataFetcher(BaoStockFetcher):
             f"Fetched index data for {index_code}: {len(df)} rows"
         )
 
-        elapsed = time.monotonic() - operation_start
-        self._record_source_result(success=True, elapsed=elapsed)
         return df

@@ -212,6 +212,40 @@ def _symbols_latest_status(
     }
 
 
+def _symbols_coverage_status(
+    conn: duckdb.DuckDBPyConnection,
+    table: str,
+    symbols: list[str],
+) -> dict[str, Any]:
+    if not symbols or not _table_exists(conn, table):
+        return {
+            "covered_count": 0,
+            "latest_count": 0,
+            "missing": symbols,
+            "stale": [],
+        }
+
+    latest_by_symbol = {
+        symbol: _date_text(max_date)
+        for symbol, max_date in conn.execute(
+            f"""
+            SELECT symbol, MAX(date) FROM {table}
+            WHERE symbol IN ({",".join(["?"] * len(symbols))})
+            GROUP BY symbol
+            """,
+            symbols,
+        ).fetchall()
+    }
+    missing = [symbol for symbol in symbols if symbol not in latest_by_symbol]
+    covered_count = len(symbols) - len(missing)
+    return {
+        "covered_count": covered_count,
+        "latest_count": covered_count,
+        "missing": missing,
+        "stale": [],
+    }
+
+
 def _add_check(
     checks: list[dict[str, Any]],
     name: str,
@@ -302,6 +336,24 @@ def _inspect_export(
         "stock_metadata_export_present",
         metadata_file.exists(),
         path=str(metadata_file),
+    )
+
+    fundamentals_dir = export_dir / "fundamentals"
+    _add_check(
+        checks,
+        "fundamentals_export_present",
+        fundamentals_dir.exists() and any(fundamentals_dir.glob("*.parquet")),
+        path=str(fundamentals_dir),
+        severity="warning",
+    )
+
+    exrights_dir = export_dir / "exrights"
+    _add_check(
+        checks,
+        "exrights_export_present",
+        exrights_dir.exists() and any(exrights_dir.glob("*.parquet")),
+        path=str(exrights_dir),
+        severity="warning",
     )
 
     return result
@@ -418,6 +470,35 @@ def check_integrity(
                 [target_date],
             ).fetchone()[0]
             report["delisted_missing_valuation"] = delisted_missing_valuation
+
+            # Fundamentals coverage check
+            if _table_exists(conn, "fundamentals"):
+                fundamentals_status = _symbols_coverage_status(
+                    conn, "fundamentals", symbols
+                )
+                report["fundamentals"] = fundamentals_status
+                _add_check(
+                    checks,
+                    "active_fundamentals_coverage",
+                    fundamentals_status["covered_count"] > 0,
+                    actual=fundamentals_status["covered_count"],
+                    missing_count=len(fundamentals_status.get("missing", [])),
+                    severity="warning",
+                )
+
+            # Exrights coverage check (at least some symbols should have data)
+            if _table_exists(conn, "exrights"):
+                exr_symbols = conn.execute(
+                    "SELECT COUNT(DISTINCT symbol) FROM exrights"
+                ).fetchone()[0]
+                report["exrights_symbols"] = exr_symbols
+                _add_check(
+                    checks,
+                    "exrights_has_data",
+                    exr_symbols > 0,
+                    actual=exr_symbols,
+                    severity="warning",
+                )
 
         if export_dir:
             report["export"] = _inspect_export(

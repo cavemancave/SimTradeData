@@ -102,6 +102,40 @@ def test_integrity_fails_when_active_cn_valuation_is_missing(tmp_path):
     assert valuation_check["missing"] == ["000001.SZ"]
 
 
+def test_integrity_treats_quarterly_fundamentals_as_coverage(tmp_path):
+    db_path = tmp_path / "cn.duckdb"
+    create_db(db_path)
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE fundamentals (
+                symbol VARCHAR NOT NULL,
+                date DATE NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO fundamentals VALUES (?, ?)",
+            [
+                ("000001.SZ", "2026-03-31"),
+                ("302132.SZ", "2026-03-31"),
+            ],
+        )
+    finally:
+        conn.close()
+
+    report = check_integrity(str(db_path), target_date="2026-06-24")
+
+    fundamentals_check = next(
+        check for check in report["checks"]
+        if check["name"] == "active_fundamentals_coverage"
+    )
+    assert fundamentals_check["status"] == "pass"
+    assert fundamentals_check["actual"] == 2
+    assert report["fundamentals"]["stale"] == []
+
+
 def test_integrity_fails_when_export_is_missing_active_valuation_file(tmp_path):
     db_path = tmp_path / "cn.duckdb"
     create_db(db_path)

@@ -97,6 +97,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with columns: code, name, market
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         if market is not None:
@@ -141,6 +143,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with columns: date, open, high, low, close, volume, amount
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         code = convert_from_ptrade_code(symbol, "mootdx")
@@ -234,6 +238,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with minute bars
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         code = convert_from_ptrade_code(symbol, "mootdx")
@@ -264,6 +270,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with real-time quote data
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         codes = [convert_from_ptrade_code(s, "mootdx") for s in symbols]
@@ -296,6 +304,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with XDXR records
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         code = convert_from_ptrade_code(symbol, "mootdx")
@@ -328,6 +338,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with financial data (FINVALUE array values)
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         code = convert_from_ptrade_code(symbol, "mootdx")
@@ -367,6 +379,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with index bars
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         code = convert_from_ptrade_code(symbol, "mootdx")
@@ -423,6 +437,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with columns: calendar_date, is_trading_day
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         # Use SSE Composite Index to derive trading days
         index_df = self.fetch_index_bars(
             "000001.SS",
@@ -467,6 +483,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with columns: date, backAdjustFactor
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         code = convert_from_ptrade_code(symbol, "mootdx")
@@ -526,6 +544,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             DataFrame with F10 categories
         """
+        if not self._ensure_source_available():
+            return pd.DataFrame()
         self._ensure_client()
 
         code = convert_from_ptrade_code(symbol, "mootdx")
@@ -548,6 +568,8 @@ class MootdxFetcher(BaseFetcher):
         Returns:
             Text content of the F10 section
         """
+        if not self._ensure_source_available():
+            return None
         self._ensure_client()
 
         code = convert_from_ptrade_code(symbol, "mootdx")
