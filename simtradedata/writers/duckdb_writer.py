@@ -17,6 +17,7 @@ import duckdb
 import pandas as pd
 
 from simtradedata.utils.paths import DUCKDB_PATH
+from simtradedata.validators.data_validator import validate_before_write
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +573,10 @@ class DuckDBWriter:
 
         df["date"] = pd.to_datetime(df["date"]).dt.date
 
+        # Validate after normalization (validator expects DatetimeIndex)
+        validate_df = df.set_index(pd.to_datetime(df["date"]))
+        validate_before_write(validate_df, "market", symbol, strict=False)
+
         columns = [
             "symbol",
             "date",
@@ -612,6 +617,10 @@ class DuckDBWriter:
                 df = df.rename(columns={"index": "date"})
 
         df["date"] = pd.to_datetime(df["date"]).dt.date
+
+        # Validate after normalization (validator expects DatetimeIndex)
+        validate_df = df.set_index(pd.to_datetime(df["date"]))
+        validate_before_write(validate_df, "valuation", symbol, strict=False)
 
         columns = [
             "symbol",
@@ -659,6 +668,10 @@ class DuckDBWriter:
             df = df.rename(columns={"end_date": "date"})
 
         df["date"] = pd.to_datetime(df["date"]).dt.date
+
+        # Validate after normalization (validator expects DatetimeIndex)
+        validate_df = df.set_index(pd.to_datetime(df["date"]))
+        validate_before_write(validate_df, "fundamental", symbol, strict=False)
 
         if "publ_date" in df.columns:
             df["publ_date"] = pd.to_datetime(

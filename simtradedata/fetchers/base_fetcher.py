@@ -137,6 +137,62 @@ class BaseFetcher(ABC):
             self._cooldown.record_failure(source, error_type)
             raise
 
+    def _ensure_source_available(self) -> bool:
+        """Check cooldown and circuit breaker before a multi-retry operation.
+
+        Unlike _make_request which checks on every attempt, this is meant
+        as a single pre-check for methods that have their own internal
+        retry loop. Returns False if the source should not be contacted.
+
+        Returns:
+            True if the source is available for requests.
+        """
+        if self._cooldown.is_in_cooldown(self.source_name):
+            logger.warning(
+                "Source '%s' is in cooldown, skipping request",
+                self.source_name,
+            )
+            return False
+        if not self._circuit_breaker.is_available():
+            logger.warning(
+                "Circuit breaker open for '%s', skipping request",
+                self.source_name,
+            )
+            return False
+        return True
+
+    def _record_source_result(
+        self,
+        success: bool,
+        elapsed: float,
+        error: Exception | None = None,
+    ) -> None:
+        """Record a multi-retry operation result in all resilience systems.
+
+        Call this once after an operation with its own internal retry
+        logic completes (success or exhausted). Unlike _make_request which
+        records per-attempt, this records the final outcome once.
+
+        Args:
+            success: Whether the overall operation succeeded.
+            elapsed: Total wall-clock time in seconds.
+            error: The final error if success is False.
+        """
+        if success:
+            self._monitor.record_request(
+                self.source_name, success=True, response_time=elapsed,
+            )
+            self._circuit_breaker.record_success()
+            self._cooldown.record_success(self.source_name)
+        else:
+            error_type = self._classify_error(error) if error else "default"
+            self._monitor.record_request(
+                self.source_name, success=False, response_time=elapsed,
+                error=str(error) if error else "",
+            )
+            self._circuit_breaker.record_failure()
+            self._cooldown.record_failure(self.source_name, error_type)
+
     @staticmethod
     def _classify_error(error) -> str:
         """Classify an exception into an error category for cooldown.

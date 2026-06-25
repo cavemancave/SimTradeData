@@ -156,6 +156,16 @@ class UnifiedDataFetcher(BaoStockFetcher):
 
         logger.debug(f"Fetching unified data for {symbol}...")
 
+        # Pre-check resilience: skip if source is blocked
+        if not self._ensure_source_available():
+            logger.warning(
+                "Skipping %s: source '%s' is unavailable (cooldown or circuit open)",
+                symbol, self.source_name,
+            )
+            return pd.DataFrame()
+
+        operation_start = time.monotonic()
+
         # Define API call function
         def api_call():
             return bs.query_history_k_data_plus(
@@ -227,10 +237,16 @@ class UnifiedDataFetcher(BaoStockFetcher):
                 time.sleep(delay)
                 continue
 
-            # Success - break out of retry loop
+            # Success - record in resilience systems
+            elapsed = time.monotonic() - operation_start
+            self._record_source_result(success=True, elapsed=elapsed)
             break
         else:
-            # All retries exhausted
+            # All retries exhausted — record failure in resilience systems
+            elapsed = time.monotonic() - operation_start
+            self._record_source_result(
+                success=False, elapsed=elapsed, error=last_error,
+            )
             if last_error:
                 logger.error(
                     f"All {MAX_API_RETRIES} attempts failed for {symbol}: {last_error}"
@@ -285,6 +301,16 @@ class UnifiedDataFetcher(BaoStockFetcher):
 
         logger.debug(f"Fetching index data for {index_code}...")
 
+        # Pre-check resilience: skip if source is blocked
+        if not self._ensure_source_available():
+            logger.warning(
+                "Skipping index %s: source '%s' is unavailable",
+                index_code, self.source_name,
+            )
+            return pd.DataFrame()
+
+        operation_start = time.monotonic()
+
         # Define API call function
         def api_call():
             return bs.query_history_k_data_plus(
@@ -304,18 +330,26 @@ class UnifiedDataFetcher(BaoStockFetcher):
                 f"BaoStock API timeout for index {index_code}"
             )
         except TimeoutError:
+            elapsed = time.monotonic() - operation_start
+            self._record_source_result(success=False, elapsed=elapsed,
+                                       error=TimeoutError(f"Timeout fetching index {index_code}"))
             logger.error(f"Timeout fetching index {index_code}, skipping")
             raise
 
         if rs.error_code != "0":
-            raise RuntimeError(
+            elapsed = time.monotonic() - operation_start
+            error = RuntimeError(
                 f"Failed to query index data for {index_code}: {rs.error_msg}"
             )
+            self._record_source_result(success=False, elapsed=elapsed, error=error)
+            raise error
 
         df = rs.get_data()
 
         if df.empty:
             logger.info(f"No index data for {index_code} (may be unavailable for date range)")
+            elapsed = time.monotonic() - operation_start
+            self._record_source_result(success=True, elapsed=elapsed)
             return pd.DataFrame()
 
         # Convert data types
@@ -338,4 +372,6 @@ class UnifiedDataFetcher(BaoStockFetcher):
             f"Fetched index data for {index_code}: {len(df)} rows"
         )
 
+        elapsed = time.monotonic() - operation_start
+        self._record_source_result(success=True, elapsed=elapsed)
         return df
