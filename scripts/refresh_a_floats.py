@@ -6,6 +6,7 @@ updated FINVALUE mapping (position 239 = a_floats), then upserts into
 the fundamentals table.
 """
 
+import sys
 import time
 
 from simtradedata.fetchers.mootdx_affair_fetcher import MootdxAffairFetcher
@@ -16,7 +17,19 @@ from simtradedata.writers.duckdb_writer import DuckDBWriter
 DB_PATH = str(DUCKDB_PATH)
 
 
+def print_usage() -> None:
+    print(
+        "Usage: poetry run python scripts/refresh_a_floats.py\n\n"
+        "Backfill a_floats into the fundamentals table from cached or "
+        "downloaded mootdx gpcw*.zip files."
+    )
+
+
 def main():
+    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+        print_usage()
+        return
+
     affair = MootdxAffairFetcher()
     writer = DuckDBWriter(db_path=DB_PATH)
 

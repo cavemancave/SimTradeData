@@ -26,6 +26,10 @@ COS_KEY_PREFIX="${COS_KEY_PREFIX:-}"
 # ── Parse arguments ─────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -h|--help)
+      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
     --market)          MARKET="$2"; shift 2 ;;
     --publish-targets) PUBLISH_TARGETS="$2"; shift 2 ;;
     --cos-bucket)      COS_BUCKET="$2"; shift 2 ;;

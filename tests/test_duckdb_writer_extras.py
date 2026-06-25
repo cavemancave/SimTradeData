@@ -298,6 +298,54 @@ class TestExportDelta:
                 check_dtype=False,
             )
 
+    def test_full_export_includes_us_symbol_tables(self, tmp_path):
+        market_df = pd.DataFrame({
+            "date": pd.to_datetime(["2026-06-22"]),
+            "open": [200.0],
+            "close": [202.0],
+            "high": [203.0],
+            "low": [199.0],
+            "preclose": [198.0],
+            "volume": [1000000],
+            "money": [202000000.0],
+        })
+        self.writer.write_market_data("AAPL.US", market_df)
+        self.writer.write_valuation(
+            "AAPL.US",
+            pd.DataFrame({
+                "date": pd.to_datetime(["2026-06-22"]),
+                "pe_ttm": [25.0],
+                "pb": [8.0],
+            }),
+        )
+        self.writer.write_fundamentals(
+            "AAPL.US",
+            pd.DataFrame({
+                "date": pd.to_datetime(["2026-03-31"]),
+                "roe": [20.0],
+                "total_shares": [100.0],
+                "a_floats": [90.0],
+            }),
+        )
+        self.writer.write_exrights(
+            "AAPL.US",
+            pd.DataFrame({
+                "date": pd.to_datetime(["2026-06-22"]),
+                "allotted_ps": [0.0],
+                "rationed_ps": [0.0],
+                "rationed_px": [0.0],
+                "bonus_ps": [0.0],
+                "dividend": [0.25],
+            }),
+        )
+
+        self.writer.export_to_parquet(str(tmp_path), market="us")
+
+        assert (tmp_path / "stocks" / "AAPL.US.parquet").exists()
+        assert (tmp_path / "valuation" / "AAPL.US.parquet").exists()
+        assert (tmp_path / "fundamentals" / "AAPL.US.parquet").exists()
+        assert (tmp_path / "exrights" / "AAPL.US.parquet").exists()
+
     def test_export_delta_exrights_can_rebuild_changed_factors(self, tmp_path):
         base_dir = tmp_path / "base" / "exrights"
         target_dir = tmp_path / "target" / "exrights"

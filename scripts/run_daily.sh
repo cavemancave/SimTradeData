@@ -22,6 +22,11 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+fi
+
 # ── Configuration ───────────────────────────────────────────────────
 MARKET="$(echo "${MARKET:-cn}" | tr '[:upper:]' '[:lower:]')"
 PUBLISH_TARGETS="${PUBLISH_TARGETS:-github}"

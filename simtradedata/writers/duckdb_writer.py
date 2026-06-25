@@ -1202,13 +1202,13 @@ class DuckDBWriter:
         self._export_stocks_batch(output_path / "stocks", market=market)
 
         logger.info("Exporting exrights...")
-        self._export_exrights_batch(output_path / "exrights")
+        self._export_exrights_batch(output_path / "exrights", market=market)
 
         logger.info("Exporting fundamentals...")
-        self._export_fundamentals_batch(output_path / "fundamentals")
+        self._export_fundamentals_batch(output_path / "fundamentals", market=market)
 
         logger.info("Exporting valuation...")
-        self._export_valuation_batch(output_path / "valuation")
+        self._export_valuation_batch(output_path / "valuation", market=market)
 
         logger.info("Exporting metadata...")
         self._export_metadata(output_path / "metadata", market=market)
@@ -2089,17 +2089,22 @@ class DuckDBWriter:
 
         df.to_parquet(str(output_file), index=False, compression="zstd")
 
-    def _export_exrights_batch(self, output_dir: Path) -> None:
+    def _export_exrights_batch(self, output_dir: Path, market: str = "cn") -> None:
         """Export all exrights with pre-computed forward adj factors (batch)."""
         import time
         import numpy as np
         t0 = time.time()
 
+        market_filter = (
+            f"WHERE {self._cn_stock_filter_sql('e.symbol')}"
+            if market == "cn"
+            else ""
+        )
         df_all = self.conn.execute(f"""
             SELECT e.symbol, e.date::TIMESTAMP_NS AS date,
                    allotted_ps, rationed_ps, rationed_px, bonus_ps, dividend
             FROM exrights e
-            WHERE {self._cn_stock_filter_sql("e.symbol")}
+            {market_filter}
             ORDER BY e.symbol, e.date
         """).fetchdf()
 
@@ -2130,11 +2135,16 @@ class DuckDBWriter:
 
         logger.info(f"Exported {count} exrights files in {time.time() - t0:.1f}s")
 
-    def _export_fundamentals_batch(self, output_dir: Path) -> None:
+    def _export_fundamentals_batch(self, output_dir: Path, market: str = "cn") -> None:
         """Export all fundamentals with TTM ratios (batch via temp table)."""
         import time
         t0 = time.time()
 
+        market_filter = (
+            f"WHERE {self._cn_stock_filter_sql('f.symbol')}"
+            if market == "cn"
+            else ""
+        )
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE _fundamentals_export AS
             SELECT
@@ -2159,7 +2169,7 @@ class DuckDBWriter:
                 interest_cover, roic, roa_ebit_ttm,
                 total_shares, a_floats
             FROM fundamentals f
-            WHERE {self._cn_stock_filter_sql("f.symbol")}
+            {market_filter}
         """)
 
         symbols = [r[0] for r in self.conn.execute(
@@ -2178,7 +2188,7 @@ class DuckDBWriter:
         self.conn.execute("DROP TABLE IF EXISTS _fundamentals_export")
         logger.info(f"Exported {len(symbols)} fundamentals files in {time.time() - t0:.1f}s")
 
-    def _export_valuation_batch(self, output_dir: Path) -> None:
+    def _export_valuation_batch(self, output_dir: Path, market: str = "cn") -> None:
         """Export all valuation data enriched with fundamentals (batch via temp table).
 
         Uses ASOF JOIN to efficiently pick the most recent fundamentals record
@@ -2187,6 +2197,11 @@ class DuckDBWriter:
         import time
         t0 = time.time()
 
+        market_filter = (
+            f"WHERE {self._cn_stock_filter_sql('v.symbol')}"
+            if market == "cn"
+            else ""
+        )
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE _valuation_export AS
             SELECT
@@ -2210,7 +2225,7 @@ class DuckDBWriter:
                 WHERE f2.symbol = v.symbol AND f2.date <= v.date
                 ORDER BY f2.date DESC LIMIT 1
             ) f ON TRUE
-            WHERE {self._cn_stock_filter_sql("v.symbol")}
+            {market_filter}
         """)
 
         symbols = [r[0] for r in self.conn.execute(
