@@ -10,9 +10,10 @@ import time
 
 from simtradedata.fetchers.mootdx_affair_fetcher import MootdxAffairFetcher
 from simtradedata.utils.code_utils import convert_to_ptrade_code
+from simtradedata.utils.paths import DUCKDB_PATH
 from simtradedata.writers.duckdb_writer import DuckDBWriter
 
-DB_PATH = "data/cn.duckdb"
+DB_PATH = str(DUCKDB_PATH)
 
 
 def main():

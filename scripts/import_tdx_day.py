@@ -306,22 +306,24 @@ class TdxDayImporter:
             min_dt = pd.to_datetime(min_date)
             max_dt = pd.to_datetime(max_date)
 
-            # Keep data outside existing range:
-            # - Historical backfill: date < min_date
-            # - New data: date > max_date
+            # Import all records outside existing range plus gap-fill within range.
+            # INSERT OR REPLACE handles duplicates safely via PRIMARY KEY.
             df_backfill = df[df["date"] < min_dt]
             df_new = df[df["date"] > max_dt]
+            df_mid = df[(df["date"] >= min_dt) & (df["date"] <= max_dt)]
 
             if df_backfill.empty and df_new.empty:
-                self.stats["records_skipped"] += 1
-                return 0
-
-            # Track backfilled records separately
-            if not df_backfill.empty:
-                self.stats["records_backfilled"] += len(df_backfill)
-
-            # Combine backfill and new data
-            df = pd.concat([df_backfill, df_new], ignore_index=True)
+                # No new data outside existing range, but still check for gaps
+                if df_mid.empty:
+                    self.stats["records_skipped"] += 1
+                    return 0
+                # Gap-fill: records within range not previously imported
+                self.stats["records_backfilled"] += len(df_mid)
+                df = df_mid
+            else:
+                if not df_backfill.empty:
+                    self.stats["records_backfilled"] += len(df_backfill)
+                df = pd.concat([df_backfill, df_mid, df_new], ignore_index=True)
 
         # Set date as index for writer
         df = df.set_index("date")

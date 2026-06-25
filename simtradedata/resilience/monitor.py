@@ -258,12 +258,9 @@ class RequestMonitor:
 
 
 # Global singleton for convenient access across the application.
-_monitor: Optional[RequestMonitor] = None
+_monitor = RequestMonitor()
 
 
 def get_monitor() -> RequestMonitor:
-    """Return the global RequestMonitor singleton, creating it on first call."""
-    global _monitor
-    if _monitor is None:
-        _monitor = RequestMonitor()
+    """Return the global RequestMonitor singleton."""
     return _monitor

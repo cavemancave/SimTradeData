@@ -9,6 +9,7 @@ with automatic upsert (INSERT OR REPLACE) for deduplication.
 import hashlib
 import json
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -521,6 +522,21 @@ class DuckDBWriter:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    @staticmethod
+    def _validate_or_warn(df: pd.DataFrame, data_type: str, symbol: str) -> None:
+        """Validate data before write and log a warning on failure.
+
+        Constructs a DatetimeIndex from the already-parsed date column
+        to avoid re-parsing, then delegates to validate_before_write.
+        """
+        date_idx = pd.DatetimeIndex(df["date"])
+        if not validate_before_write(df.set_index(date_idx), data_type, symbol,
+                                     strict=False):
+            logger.warning(
+                "%s data validation failed for %s, writing anyway",
+                data_type.capitalize(), symbol,
+            )
+
     def _record_symbol_changes(self, table_name: str, df: pd.DataFrame) -> None:
         """Record symbol/date rows touched by an upsert for delta export."""
         if df.empty or "symbol" not in df.columns or "date" not in df.columns:
@@ -572,10 +588,7 @@ class DuckDBWriter:
                 df = df.rename(columns={"index": "date"})
 
         df["date"] = pd.to_datetime(df["date"]).dt.date
-
-        # Validate after normalization (validator expects DatetimeIndex)
-        validate_df = df.set_index(pd.to_datetime(df["date"]))
-        validate_before_write(validate_df, "market", symbol, strict=False)
+        self._validate_or_warn(df, "market", symbol)
 
         columns = [
             "symbol",
@@ -617,10 +630,7 @@ class DuckDBWriter:
                 df = df.rename(columns={"index": "date"})
 
         df["date"] = pd.to_datetime(df["date"]).dt.date
-
-        # Validate after normalization (validator expects DatetimeIndex)
-        validate_df = df.set_index(pd.to_datetime(df["date"]))
-        validate_before_write(validate_df, "valuation", symbol, strict=False)
+        self._validate_or_warn(df, "valuation", symbol)
 
         columns = [
             "symbol",
@@ -668,15 +678,13 @@ class DuckDBWriter:
             df = df.rename(columns={"end_date": "date"})
 
         df["date"] = pd.to_datetime(df["date"]).dt.date
-
-        # Validate after normalization (validator expects DatetimeIndex)
-        validate_df = df.set_index(pd.to_datetime(df["date"]))
-        validate_before_write(validate_df, "fundamental", symbol, strict=False)
+        self._validate_or_warn(df, "fundamental", symbol)
 
         if "publ_date" in df.columns:
-            df["publ_date"] = pd.to_datetime(
-                df["publ_date"], errors="coerce"
-            ).dt.strftime("%Y%m%d")
+            publ_dt = pd.to_datetime(df["publ_date"], errors="coerce")
+            df["publ_date"] = publ_dt.dt.strftime("%Y%m%d").where(
+                publ_dt.notna(), None
+            )
 
         columns = [
             "symbol",
@@ -1153,6 +1161,22 @@ class DuckDBWriter:
     # Export to Parquet
     # ========================================
 
+    @staticmethod
+    def _safe_rmtree(path: Path) -> None:
+        """Remove a directory tree with basic safety guards.
+
+        Refuses to delete top-level system paths to prevent catastrophic
+        data loss from misconfigured output directories.
+        """
+        resolved = path.resolve()
+        dangerous = {Path("/"), Path.home()}
+        if resolved in dangerous or len(resolved.parts) <= 2:
+            raise ValueError(
+                f"Refusing to delete unsafe path: {resolved}. "
+                f"Check output_dir configuration."
+            )
+        shutil.rmtree(path)
+
     def export_to_parquet(self, output_dir: str, market: str = "cn") -> None:
         """Export all data to PTrade Parquet format"""
         output_path = Path(output_dir)
@@ -1162,9 +1186,7 @@ class DuckDBWriter:
 
         # Clean output directory to avoid mixing data from different markets
         if output_path.exists():
-            import shutil
-
-            shutil.rmtree(output_path)
+            self._safe_rmtree(output_path)
 
         for subdir in ["stocks", "exrights", "fundamentals", "valuation", "metadata"]:
             (output_path / subdir).mkdir(parents=True, exist_ok=True)
@@ -1198,16 +1220,17 @@ class DuckDBWriter:
         """Export changed rows for client-side delta merge."""
         output_path = Path(output_dir)
         if output_path.exists():
-            import shutil
-
-            shutil.rmtree(output_path)
+            self._safe_rmtree(output_path)
 
         output_path.mkdir(parents=True, exist_ok=True)
         target_version = target_version or self.get_max_date("stocks")
         if not target_version:
             raise ValueError("target_version is required when stocks table is empty")
         if target_version <= base_version:
-            raise ValueError("target_version must be newer than base_version")
+            raise ValueError(
+                f"target_version ({target_version}) must be newer than "
+                f"base_version ({base_version})"
+            )
 
         # Only recompute derived fundamentals for symbols that changed,
         # avoiding a full-table window function scan for every delta export.
@@ -1260,9 +1283,8 @@ class DuckDBWriter:
         changed_tables.extend(metadata_tables)
 
         if not changed_tables:
-            import shutil
-
-            shutil.rmtree(output_path)
+            # Clean up empty output directory before raising
+            self._safe_rmtree(output_path)
             raise ValueError("no changed rows for delta export")
 
         self._write_delta_version_file(metadata_dir, target_version, market)
@@ -2693,9 +2715,10 @@ class DuckDBWriter:
         # Active in mootdx → '2900-01-01'
         # Not active and last_date < latest → last_date (likely delisted)
         active_set = set(active_stock_names.keys())
-        latest_date_str = str(
-            self.conn.execute("SELECT MAX(date) FROM stocks").fetchone()[0]
-        )
+        max_date_val = self.conn.execute(
+            "SELECT MAX(date) FROM stocks"
+        ).fetchone()[0]
+        latest_date_str = str(max_date_val) if max_date_val is not None else ""
 
         # Pre-load existing blocks to preserve them
         existing_blocks = {}
@@ -2801,14 +2824,20 @@ class DuckDBWriter:
             GROUP BY date
         """)
 
-        # Replace existing HALT entries
-        self.conn.execute(
-            "DELETE FROM stock_status WHERE status_type = 'HALT'"
-        )
-        self.conn.execute("""
-            INSERT INTO stock_status (date, status_type, symbols)
-            SELECT date, status_type, symbols FROM _halt_enriched
-        """)
+        # Replace existing HALT entries atomically
+        self.begin()
+        try:
+            self.conn.execute(
+                "DELETE FROM stock_status WHERE status_type = 'HALT'"
+            )
+            self.conn.execute("""
+                INSERT INTO stock_status (date, status_type, symbols)
+                SELECT date, status_type, symbols FROM _halt_enriched
+            """)
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
         self.conn.execute("DROP TABLE IF EXISTS _halt_enriched")
 
         halt_count = self.conn.execute(

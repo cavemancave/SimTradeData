@@ -594,7 +594,7 @@ class YFinanceFetcher(BaseFetcher):
         if "Stock Splits" in actions.columns:
             splits = actions["Stock Splits"]
             result["allotted_ps"] = splits.apply(
-                lambda x: x - 1.0 if x > 0 else 0.0
+                lambda x: x - 1.0 if x >= 1.0 else 0.0
             )
         else:
             result["allotted_ps"] = 0.0

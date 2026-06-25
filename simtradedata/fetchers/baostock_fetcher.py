@@ -3,6 +3,7 @@ BaoStock data fetcher implementation
 """
 
 import logging
+import threading
 from datetime import datetime
 
 import baostock as bs
@@ -34,38 +35,42 @@ class BaoStockFetcher(BaseFetcher):
     # Class-level login state tracking (BaoStock uses global session)
     _bs_logged_in = False
     _bs_login_count = 0
+    _bs_lock = threading.Lock()
 
     @retry(config=_BAOSTOCK_RETRY)
     def _do_login(self):
         """BaoStock-specific login implementation"""
-        # BaoStock uses a global session, only login once
-        if not BaoStockFetcher._bs_logged_in:
-            lg = bs.login()
-            if lg.error_code != "0":
-                raise ConnectionError(f"BaoStock login failed: {lg.error_msg}")
-            BaoStockFetcher._bs_logged_in = True
-            logger.info("BaoStock login successful")
-        BaoStockFetcher._bs_login_count += 1
+        with BaoStockFetcher._bs_lock:
+            # BaoStock uses a global session, only login once
+            if not BaoStockFetcher._bs_logged_in:
+                lg = bs.login()
+                if lg.error_code != "0":
+                    raise ConnectionError(f"BaoStock login failed: {lg.error_msg}")
+                BaoStockFetcher._bs_logged_in = True
+                logger.info("BaoStock login successful")
+            BaoStockFetcher._bs_login_count += 1
 
     @classmethod
     @retry(config=_BAOSTOCK_RETRY)
     def _ensure_login(cls):
         """Ensure BaoStock session is valid, re-login if needed"""
-        if not cls._bs_logged_in:
-            lg = bs.login()
-            if lg.error_code != "0":
-                raise ConnectionError(f"BaoStock re-login failed: {lg.error_msg}")
-            cls._bs_logged_in = True
-            logger.info("BaoStock re-login successful")
+        with cls._bs_lock:
+            if not cls._bs_logged_in:
+                lg = bs.login()
+                if lg.error_code != "0":
+                    raise ConnectionError(f"BaoStock re-login failed: {lg.error_msg}")
+                cls._bs_logged_in = True
+                logger.info("BaoStock re-login successful")
 
     def _do_logout(self):
         """BaoStock-specific logout implementation"""
-        BaoStockFetcher._bs_login_count -= 1
-        # Only logout when last fetcher disconnects
-        if BaoStockFetcher._bs_login_count <= 0:
-            bs.logout()
-            BaoStockFetcher._bs_logged_in = False
-            BaoStockFetcher._bs_login_count = 0
+        with BaoStockFetcher._bs_lock:
+            BaoStockFetcher._bs_login_count -= 1
+            # Only logout when last fetcher disconnects
+            if BaoStockFetcher._bs_login_count <= 0:
+                bs.logout()
+                BaoStockFetcher._bs_logged_in = False
+                BaoStockFetcher._bs_login_count = 0
 
 
     @retry(config=_BAOSTOCK_RETRY)

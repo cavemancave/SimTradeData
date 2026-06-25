@@ -51,7 +51,10 @@ class DataSplitter:
         """
         if df.empty:
             logger.warning("Empty DataFrame provided to split_data")
-            return {}
+            return {
+                key: pd.DataFrame()
+                for key in self.routing_config
+            }
         
         result = {}
         

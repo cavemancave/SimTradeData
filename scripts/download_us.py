@@ -13,10 +13,7 @@ Output: DuckDB database (data/us.duckdb)
 """
 
 import argparse
-import fcntl
 import logging
-import os
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -25,6 +22,7 @@ from tqdm import tqdm
 
 from simtradedata.fetchers.yfinance_fetcher import YFinanceFetcher
 from simtradedata.utils.paths import US_DUCKDB_PATH
+from simtradedata.utils.process_lock import ProcessLock
 from simtradedata.writers.duckdb_writer import DuckDBWriter
 
 # Configuration
@@ -50,43 +48,6 @@ logging.basicConfig(
     filemode="w",
 )
 logger = logging.getLogger(__name__)
-
-
-class ProcessLock:
-    """Process lock to prevent multiple instances from running simultaneously."""
-
-    def __init__(self, lock_file: str):
-        self.lock_file = Path(lock_file)
-        self.lock_fd = None
-
-    def __enter__(self):
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        self.lock_fd = open(self.lock_file, "w")
-
-        try:
-            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.lock_fd.write(str(os.getpid()))
-            self.lock_fd.flush()
-        except IOError:
-            print("\nError: Another US download process is running")
-            print(f"Lock file: {self.lock_file}")
-            print("\nIf no other process is running, delete the lock file:")
-            print(f"  rm {self.lock_file}")
-            sys.exit(1)
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.lock_fd:
-            try:
-                fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
-                self.lock_fd.close()
-            except Exception:
-                pass
-            try:
-                self.lock_file.unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 class USDownloader:
@@ -422,12 +383,19 @@ def download_us_data(
             # Filter stocks needing OHLCV update
             needs_ohlcv = []
             already_current = []
+            needs_fundamentals = []
+            needs_metadata = []
             for sym in stock_list:
                 sym_start = downloader.get_incremental_start_date(sym, use_start_date)
                 if sym_start >= end_date_str:
                     already_current.append(sym)
                 else:
                     needs_ohlcv.append(sym)
+                # Track stocks that have never had fundamentals/metadata downloaded
+                if not downloader.writer.get_max_date("fundamentals", sym):
+                    needs_fundamentals.append(sym)
+                if not downloader.writer.get_max_date("valuation", sym):
+                    needs_metadata.append(sym)
 
             if already_current:
                 print(f"  Resume: {len(needs_ohlcv)} need download, "
@@ -469,40 +437,44 @@ def download_us_data(
                 print("\nAll stocks already have latest OHLCV data.")
 
             # Phase 3: Per-stock fundamentals + valuation
-            if not skip_fundamentals and needs_ohlcv:
-                print(f"\nDownloading fundamentals for {len(needs_ohlcv)} stocks...")
+            # Use union of stocks needing OHLCV refresh + stocks never downloaded
+            fund_targets = sorted(set(needs_ohlcv) | set(needs_fundamentals))
+            if not skip_fundamentals and fund_targets:
+                print(f"\nDownloading fundamentals for {len(fund_targets)} stocks...")
                 print("=" * 60)
                 with tqdm(
-                    total=len(needs_ohlcv),
+                    total=len(fund_targets),
                     desc="Fundamentals",
                     unit="stock",
                     ncols=100,
                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
                 ) as pbar:
                     n = downloader.download_fundamentals_and_valuation(
-                        needs_ohlcv, pbar
+                        fund_targets, pbar
                     )
                 print("=" * 60)
                 print(f"Fundamentals complete: {n} updated, "
-                      f"{len(needs_ohlcv) - n} skipped/failed")
+                      f"{len(fund_targets) - n} skipped/failed")
 
             # Phase 4: Per-stock metadata + exrights
-            if not skip_metadata and needs_ohlcv:
-                print(f"\nDownloading metadata for {len(needs_ohlcv)} stocks...")
+            # Use union of stocks needing OHLCV refresh + stocks never downloaded
+            meta_targets = sorted(set(needs_ohlcv) | set(needs_metadata))
+            if not skip_metadata and meta_targets:
+                print(f"\nDownloading metadata for {len(meta_targets)} stocks...")
                 print("=" * 60)
                 with tqdm(
-                    total=len(needs_ohlcv),
+                    total=len(meta_targets),
                     desc="Metadata",
                     unit="stock",
                     ncols=100,
                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
                 ) as pbar:
                     n = downloader.download_metadata_and_exrights(
-                        needs_ohlcv, pbar
+                        meta_targets, pbar
                     )
                 print("=" * 60)
                 print(f"Metadata complete: {n} updated, "
-                      f"{len(needs_ohlcv) - n} skipped/failed")
+                      f"{len(meta_targets) - n} skipped/failed")
 
             # Phase 5: Global data
             print("\nDownloading benchmark & index data...")

@@ -14,11 +14,8 @@ Output: DuckDB database (data/cn.duckdb)
 """
 
 import argparse
-import fcntl
 import logging
-import os
 import socket
-import sys
 import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,6 +28,7 @@ from tqdm import tqdm  # noqa: E402
 
 from simtradedata.config.field_mappings import BENCHMARK_CONFIG  # noqa: E402
 from simtradedata.fetchers.mootdx_unified_fetcher import MootdxUnifiedFetcher  # noqa: E402
+from simtradedata.utils.process_lock import ProcessLock  # noqa: E402
 from simtradedata.writers.duckdb_writer import DEFAULT_DB_PATH, DuckDBWriter  # noqa: E402
 
 # Configuration
@@ -58,44 +56,6 @@ logger = logging.getLogger(__name__)
 
 # Prevent infinite hangs on TDX server socket recv()
 socket.setdefaulttimeout(30)
-
-
-class ProcessLock:
-    """Process lock to prevent multiple instances from running simultaneously"""
-
-    def __init__(self, lock_file: str):
-        self.lock_file = Path(lock_file)
-        self.lock_fd = None
-
-    def __enter__(self):
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        self.lock_fd = open(self.lock_file, "w")
-
-        try:
-            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.lock_fd.write(str(os.getpid()))
-            self.lock_fd.flush()
-        except IOError:
-            print("\nError: Another mootdx download process is running")
-            print(f"Lock file: {self.lock_file}")
-            print("\nIf no other process is running, delete the lock file:")
-            print(f"  rm {self.lock_file}")
-            sys.exit(1)
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.lock_fd:
-            try:
-                fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
-                self.lock_fd.close()
-            except Exception:
-                pass
-
-            try:
-                self.lock_file.unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 class MootdxDownloader:
@@ -185,8 +145,20 @@ class MootdxDownloader:
                         downloaded = True
 
 
-            # --- XDXR: download if missing for this symbol ---
-            if not self.writer.get_max_date("exrights", symbol):
+            # --- XDXR: download if missing or suspiciously sparse for this symbol ---
+            exr_max = self.writer.get_max_date("exrights", symbol)
+            needs_xdxr = not exr_max
+            if exr_max:
+                exr_count = self.writer.conn.execute(
+                    "SELECT COUNT(*) FROM exrights WHERE symbol = ?", [symbol]
+                ).fetchone()[0]
+                if exr_count < 3:
+                    logger.info(
+                        f"XDXR for {symbol} has only {exr_count} events (max_date={exr_max}), "
+                        f"re-downloading to fill potential gaps"
+                    )
+                    needs_xdxr = True
+            if needs_xdxr:
                 try:
                     xdxr_df = self.unified_fetcher.fetch_xdxr(symbol)
                     if not xdxr_df.empty:
@@ -860,8 +832,14 @@ def download_all_data(
                 logger.error(f"Failed to download benchmark: {e}")
 
         finally:
-            downloader.writer.close()
-            downloader.unified_fetcher.logout()
+            try:
+                downloader.writer.close()
+            except Exception as e:
+                logger.warning("Failed to close writer: %s", e)
+            try:
+                downloader.unified_fetcher.logout()
+            except Exception as e:
+                logger.warning("Failed to logout unified_fetcher: %s", e)
 
         # Summary
         print("\n" + "=" * 70)

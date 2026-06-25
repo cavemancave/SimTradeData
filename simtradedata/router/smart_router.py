@@ -129,12 +129,14 @@ class SmartRouter:
 
         sources = self._resolve_sources(data_type, market)
         errors = []
+        skipped_unhealthy = []
 
         for source_name in sources:
             fetcher = self._get_fetcher(source_name)
 
             if not self._is_source_healthy(fetcher):
                 logger.debug("Skipping %s: circuit breaker open", source_name)
+                skipped_unhealthy.append(source_name)
                 continue
 
             try:
@@ -159,6 +161,11 @@ class SmartRouter:
             detail = "; ".join(f"{s}: {e}" for s, e in errors)
             raise DataSourceError(
                 f"All sources failed for {data_type}: {detail}"
+            )
+        if skipped_unhealthy and not errors:
+            raise DataSourceError(
+                f"All sources skipped for {data_type}: "
+                f"{', '.join(skipped_unhealthy)} (circuit breaker open)"
             )
         return pd.DataFrame()
 
