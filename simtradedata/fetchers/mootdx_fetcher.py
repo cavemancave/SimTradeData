@@ -194,6 +194,8 @@ class MootdxFetcher(BaseFetcher):
                     df = df_adj
 
             # Standardize column names
+            if "volume" in df.columns and "vol" in df.columns:
+                df = df.drop(columns=["vol"])
             df = df.rename(
                 columns={
                     "datetime": "date",
