@@ -74,6 +74,13 @@ def _write_archive(output: Path, package_dir: Path, files: list[str]) -> None:
             tar.add(package_dir / name, arcname=name)
 
 
+def _write_manifest_archive(output: Path, manifest: dict) -> None:
+    with tempfile.TemporaryDirectory(prefix="simtradedata-delta-") as tmp:
+        package_dir = Path(tmp)
+        _write_manifest(package_dir / "manifest.json", manifest)
+        _write_archive(output, package_dir, ["manifest.json"])
+
+
 def export_api_delta(
     *,
     market: str,
@@ -81,11 +88,32 @@ def export_api_delta(
     last_sync: dt.date,
     output: Path,
     max_days: int,
+    retry_after: int = 300,
 ) -> None:
     if not db_path.exists():
         raise SystemExit(f"Database not found: {db_path}")
 
-    with duckdb.connect(str(db_path), read_only=True) as conn:
+    try:
+        conn = duckdb.connect(str(db_path), read_only=True)
+    except duckdb.IOException as exc:
+        message = str(exc)
+        if "Could not set lock" not in message and "Conflicting lock" not in message:
+            raise
+        _write_manifest_archive(output, {
+            "package_format": "simtradedata_api_delta_v1",
+            "schema_version": 1,
+            "market": market,
+            "from_version": last_sync.isoformat(),
+            "to_version": None,
+            "up_to_date": False,
+            "fallback_to_baseline": False,
+            "pipeline_busy": True,
+            "retry_after": retry_after,
+            "tables": [],
+        })
+        return
+
+    with conn:
         latest = _latest_stock_date(conn)
         base_manifest = {
             "package_format": "simtradedata_api_delta_v1",
@@ -95,6 +123,8 @@ def export_api_delta(
             "to_version": latest.isoformat(),
             "up_to_date": last_sync >= latest,
             "fallback_to_baseline": False,
+            "pipeline_busy": False,
+            "retry_after": None,
             "tables": [],
         }
 
@@ -182,6 +212,7 @@ def main() -> None:
     parser.add_argument("--last-sync", required=True, help="Last local version, YYYY-MM-DD")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-days", type=int, default=60)
+    parser.add_argument("--retry-after", type=int, default=300)
     args = parser.parse_args()
 
     export_api_delta(
@@ -190,6 +221,7 @@ def main() -> None:
         last_sync=_parse_date(args.last_sync),
         output=args.output,
         max_days=args.max_days,
+        retry_after=args.retry_after,
     )
 
 

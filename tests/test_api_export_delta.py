@@ -134,3 +134,23 @@ def test_api_delta_recommends_baseline_when_window_is_too_large(tmp_path):
     assert manifest["fallback_to_baseline"] is True
     assert manifest["reason"] == "delta_window_too_large"
     assert manifest["tables"] == []
+
+
+def test_api_delta_returns_busy_manifest_when_duckdb_is_locked(tmp_path):
+    db_path = tmp_path / "cn.duckdb"
+    _seed_delta_db(db_path)
+
+    lock_holder = DuckDBWriter(db_path=str(db_path))
+    try:
+        result = _run_export(tmp_path, db_path, "2026-06-25")
+    finally:
+        lock_holder.close()
+
+    assert result.returncode == 0, result.stderr
+    with tarfile.open(tmp_path / "delta.tar.gz", "r:gz") as tar:
+        assert tar.getnames() == ["manifest.json"]
+        manifest = json.load(tar.extractfile("manifest.json"))
+
+    assert manifest["pipeline_busy"] is True
+    assert manifest["retry_after"] == 300
+    assert manifest["tables"] == []
