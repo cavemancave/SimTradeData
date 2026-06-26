@@ -2,16 +2,17 @@
 # Daily data refresh and release pipeline for SimTradeData.
 #
 # Usage (from crontab or systemd timer):
-#   MARKET=cn PUBLISH_TARGETS=all COS_BUCKET=my-bucket COS_REGION=ap-guangzhou \
+#   MARKET=cn PUBLISH_TARGETS=local \
 #   bash scripts/run_daily.sh
 #
 # Environment variables:
 #   MARKET              Market to refresh: cn | us (default: cn)
-#   PUBLISH_TARGETS     github | cos | all (default: github)
+#   PUBLISH_TARGETS     local | github | cos | all (default: github)
 #   SIMTRADE_DATA_DIR   Path to SimTradeData repo (default: ../SimTradeData)
 #   COS_BUCKET          COS bucket name (required for cos target)
 #   COS_REGION          COS region (required for cos target)
 #   COS_KEY_PREFIX      COS key prefix (default: "")
+#   LOCAL_RELEASE_DIR   Local artifact directory for local target (default: data/releases)
 #   ALERT_WEBHOOK_URL   Webhook URL for failure alerts (optional)
 #   LOCK_FILE           Path to lock file (default: /tmp/simtradedata_daily.lock)
 #   LOG_DIR             Directory for run logs (default: logs/daily)
@@ -216,6 +217,9 @@ if [[ "$PUBLISH_TARGETS" == "cos" || "$PUBLISH_TARGETS" == "all" ]]; then
   if [[ -n "$COS_BUCKET" ]]; then RELEASE_ARGS="$RELEASE_ARGS --cos-bucket $COS_BUCKET"; fi
   if [[ -n "$COS_REGION" ]]; then RELEASE_ARGS="$RELEASE_ARGS --cos-region $COS_REGION"; fi
   if [[ -n "$COS_KEY_PREFIX" ]]; then RELEASE_ARGS="$RELEASE_ARGS --cos-key-prefix $COS_KEY_PREFIX"; fi
+fi
+if [[ "$PUBLISH_TARGETS" == "local" && -n "${LOCAL_RELEASE_DIR:-}" ]]; then
+  RELEASE_ARGS="$RELEASE_ARGS --local-release-dir $LOCAL_RELEASE_DIR"
 fi
 
 if ! bash scripts/release_data.sh $RELEASE_ARGS; then

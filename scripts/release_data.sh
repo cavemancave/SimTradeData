@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Export data from DuckDB and release to GitHub / Tencent COS.
+# Export data from DuckDB and release locally, to GitHub, or to Tencent COS.
 # Usage: bash scripts/release_data.sh [options]
 #
 # This script:
 # 1. Runs export_parquet.py → data/export/{market}/
 # 2. Packages into a single tar.gz
-# 3. Publishes to GitHub Release and/or Tencent COS
+# 3. Publishes locally, to GitHub Release, and/or Tencent COS
 #
 # Prerequisites:
+#   Local:   no external dependencies
 #   GitHub:  poetry install, gh auth login
 #   COS:     COS_SECRET_ID / COS_SECRET_KEY env vars set
 
@@ -18,10 +19,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Defaults ────────────────────────────────────────────────────────
 MARKET="cn"
-PUBLISH_TARGETS="github"          # github | cos | all
+PUBLISH_TARGETS="github"          # local | github | cos | all
 COS_BUCKET="${COS_BUCKET:-}"
 COS_REGION="${COS_REGION:-}"
 COS_KEY_PREFIX="${COS_KEY_PREFIX:-}"
+LOCAL_RELEASE_DIR="${LOCAL_RELEASE_DIR:-$PROJECT_ROOT/data/releases}"
 
 # ── Parse arguments ─────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --cos-bucket)      COS_BUCKET="$2"; shift 2 ;;
     --cos-region)      COS_REGION="$2"; shift 2 ;;
     --cos-key-prefix)  COS_KEY_PREFIX="$2"; shift 2 ;;
+    --local-release-dir) LOCAL_RELEASE_DIR="$2"; shift 2 ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -45,8 +48,8 @@ if [[ "$MARKET" != "cn" && "$MARKET" != "us" && "$MARKET" != "all" ]]; then
   exit 1
 fi
 
-if [[ "$PUBLISH_TARGETS" != "github" && "$PUBLISH_TARGETS" != "cos" && "$PUBLISH_TARGETS" != "all" ]]; then
-  echo "ERROR: --publish-targets must be github, cos, or all"
+if [[ "$PUBLISH_TARGETS" != "local" && "$PUBLISH_TARGETS" != "github" && "$PUBLISH_TARGETS" != "cos" && "$PUBLISH_TARGETS" != "all" ]]; then
+  echo "ERROR: --publish-targets must be local, github, cos, or all"
   exit 1
 fi
 
@@ -72,6 +75,7 @@ release_market() {
   local tag="data-${market}-${version}"
   local archive="/tmp/simtradedata-${market}-${version}.tar.gz"
   local archive_name="${tag}.tar.gz"
+  local local_archive="$LOCAL_RELEASE_DIR/$archive_name"
 
   # 2. Package
   echo ""
@@ -82,10 +86,24 @@ release_market() {
   size=$(du -h "$archive" | cut -f1)
   echo "  -> $archive ($size)"
 
+  local local_ok=true
   local github_ok=true
   local cos_ok=true
 
-  # 3a. GitHub Release
+  # 3a. Local artifact
+  if [[ "$PUBLISH_TARGETS" == "local" ]]; then
+    echo ""
+    echo "=== Publishing locally ==="
+    mkdir -p "$LOCAL_RELEASE_DIR"
+    cp "$archive" "$local_archive" || local_ok=false
+    if $local_ok; then
+      echo "  -> $local_archive"
+    else
+      echo "  ERROR: local publish failed"
+    fi
+  fi
+
+  # 3b. GitHub Release
   if [[ "$PUBLISH_TARGETS" == "github" || "$PUBLISH_TARGETS" == "all" ]]; then
     echo ""
     echo "=== Publishing to GitHub ==="
@@ -105,7 +123,7 @@ release_market() {
     fi
   fi
 
-  # 3b. Tencent COS
+  # 3c. Tencent COS
   if [[ "$PUBLISH_TARGETS" == "cos" || "$PUBLISH_TARGETS" == "all" ]]; then
     echo ""
     echo "=== Publishing to COS ==="
@@ -131,15 +149,18 @@ release_market() {
   # 5. Summary
   echo ""
   echo "=== Release Summary for $market ==="
+  if [[ "$PUBLISH_TARGETS" == "local" ]]; then
+    echo "  Local:  $($local_ok && echo 'OK' || echo 'FAILED')"
+  fi
   if [[ "$PUBLISH_TARGETS" == "github" || "$PUBLISH_TARGETS" == "all" ]]; then
-    echo "  GitHub: $($github_ok && echo '✓' || echo '✗ FAILED')"
+    echo "  GitHub: $($github_ok && echo 'OK' || echo 'FAILED')"
   fi
   if [[ "$PUBLISH_TARGETS" == "cos" || "$PUBLISH_TARGETS" == "all" ]]; then
-    echo "  COS:    $($cos_ok && echo '✓' || echo '✗ FAILED')"
+    echo "  COS:    $($cos_ok && echo 'OK' || echo 'FAILED')"
   fi
 
   # Fail if any requested target failed
-  if ! $github_ok || ! $cos_ok; then
+  if ! $local_ok || ! $github_ok || ! $cos_ok; then
     return 1
   fi
   echo ""
