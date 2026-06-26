@@ -2,10 +2,6 @@
 Utility functions for stock code conversion
 """
 
-from functools import wraps
-import time
-import warnings
-
 
 def convert_to_ptrade_code(code: str, source: str = "baostock") -> str:
     """
@@ -185,29 +181,3 @@ def get_price_divisor(symbol: str) -> float:
     so callers can simply divide: ``price / get_price_divisor(code)``.
     """
     return 10.0 if is_etf_code(symbol) else 1.0
-
-
-def retry_on_failure(max_retries: int = 1, delay: float = 0.0):
-    """Deprecated: use simtradedata.resilience.retry.retry instead."""
-    warnings.warn(
-        "retry_on_failure is deprecated, use simtradedata.resilience.retry.retry",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_exception = None
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        time.sleep(delay)
-            raise last_exception
-
-        return wrapper
-
-    return decorator

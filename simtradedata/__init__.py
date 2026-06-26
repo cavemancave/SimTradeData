@@ -9,7 +9,6 @@ __version__ = "0.2.0"
 
 __all__ = [
     "BaoStockFetcher",
-    "DataConverter",
     "DuckDBWriter",
 ]
 
@@ -18,9 +17,6 @@ def __getattr__(name: str):
     if name == "BaoStockFetcher":
         from simtradedata.fetchers.baostock_fetcher import BaoStockFetcher
         return BaoStockFetcher
-    if name == "DataConverter":
-        from simtradedata.converters.data_converter import DataConverter
-        return DataConverter
     if name == "DuckDBWriter":
         from simtradedata.writers.duckdb_writer import DuckDBWriter
         return DuckDBWriter

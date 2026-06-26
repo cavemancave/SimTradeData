@@ -2,8 +2,10 @@
 
 import hashlib
 from functools import wraps
+from threading import RLock
 
-from simtradedata.cache.cache import MemoryCache
+from cachetools import TTLCache
+
 
 # TTL configuration per data type (seconds)
 DEFAULT_TTL = {
@@ -13,13 +15,6 @@ DEFAULT_TTL = {
     "fundamentals": 3600,      # 1h
     "trade_calendar": 604800,  # 7 days
 }
-
-_default_cache = MemoryCache(max_size=1000)
-
-
-def get_default_cache() -> MemoryCache:
-    """Return the module-level shared cache instance."""
-    return _default_cache
 
 
 def _make_key(prefix: str, args: tuple, kwargs: dict) -> str:
@@ -40,21 +35,27 @@ def cached(ttl: float, key_prefix: str):
     - ``func.invalidate(*args, **kwargs)`` -- remove cached entry
     - ``func.nocache(*args, **kwargs)`` -- call without cache
     """
+    store = TTLCache(maxsize=1000, ttl=ttl)
+    lock = RLock()
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
             key = _make_key(key_prefix, args, kwargs)
-            result = _default_cache.get(key)
-            if result is not None:
-                return result
+            with lock:
+                try:
+                    return store[key]
+                except KeyError:
+                    pass
             result = func(*args, **kwargs)
-            _default_cache.set(key, result, ttl)
+            with lock:
+                store[key] = result
             return result
 
         def invalidate(*args, **kwargs):
             key = _make_key(key_prefix, args, kwargs)
-            _default_cache.delete(key)
+            with lock:
+                store.pop(key, None)
 
         def nocache(*args, **kwargs):
             return func(*args, **kwargs)

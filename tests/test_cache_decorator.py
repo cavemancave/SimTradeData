@@ -2,15 +2,12 @@
 
 import pytest
 
-from simtradedata.cache.decorator import DEFAULT_TTL, cached, get_default_cache
+from simtradedata.cache.decorator import DEFAULT_TTL, cached
 
 
 @pytest.mark.unit
 class TestCachedDecorator:
     """Tests for the @cached decorator."""
-
-    def setup_method(self):
-        get_default_cache().clear()
 
     def test_caches_return_value(self):
         call_count = 0
