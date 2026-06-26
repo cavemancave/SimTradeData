@@ -207,6 +207,65 @@ def test_integrity_excludes_metadata_not_seen_in_latest_stock_pool(tmp_path):
     assert report["active_symbols"] == 1
 
 
+def test_integrity_ignores_stale_stock_pool_when_metadata_is_current(tmp_path):
+    db_path = tmp_path / "cn.duckdb"
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE stocks (symbol VARCHAR NOT NULL, date DATE NOT NULL)")
+        conn.execute(
+            "CREATE TABLE valuation (symbol VARCHAR NOT NULL, date DATE NOT NULL)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE stock_metadata (
+                symbol VARCHAR NOT NULL,
+                de_listed_date DATE,
+                security_type VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE stock_pool (
+                symbol VARCHAR NOT NULL,
+                first_seen_date DATE,
+                last_seen_date DATE
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO stock_metadata VALUES (?, ?, ?)",
+            [
+                ("000001.SZ", "2900-01-01", "1"),
+                ("000002.SZ", "2900-01-01", "1"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO stock_pool VALUES ('000001.SZ', '2020-01-01', '2020-04-01')"
+        )
+        conn.executemany(
+            "INSERT INTO stocks VALUES (?, ?)",
+            [
+                ("000001.SZ", "2026-06-24"),
+                ("000002.SZ", "2026-06-24"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO valuation VALUES (?, ?)",
+            [
+                ("000001.SZ", "2026-06-24"),
+                ("000002.SZ", "2026-06-24"),
+            ],
+        )
+    finally:
+        conn.close()
+
+    report = check_integrity(str(db_path), target_date="2026-06-24")
+
+    assert report["status"] == "pass"
+    assert report["active_symbols"] == 2
+
+
 def test_integrity_fails_when_active_cn_valuation_is_missing(tmp_path):
     db_path = tmp_path / "cn.duckdb"
     create_db(db_path, include_active_valuation=False)

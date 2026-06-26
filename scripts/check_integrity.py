@@ -134,16 +134,20 @@ def _active_cn_symbols(
     if _table_exists(conn, "stock_pool"):
         stock_pool_columns = _table_columns(conn, "stock_pool")
         if "last_seen_date" in stock_pool_columns:
-            current_pool = {
-                row[0]
-                for row in conn.execute(
-                    """
-                    SELECT symbol FROM stock_pool
-                    WHERE last_seen_date >= ?
-                    """,
-                    [target_date],
-                ).fetchall()
-            }
+            latest_pool_date = _date_text(
+                conn.execute("SELECT MAX(last_seen_date) FROM stock_pool").fetchone()[0]
+            )
+            if latest_pool_date and latest_pool_date >= target_date:
+                current_pool = {
+                    row[0]
+                    for row in conn.execute(
+                        """
+                        SELECT symbol FROM stock_pool
+                        WHERE last_seen_date >= ?
+                        """,
+                        [target_date],
+                    ).fetchall()
+                }
 
     if _table_exists(conn, "stock_metadata"):
         metadata_columns = _table_columns(conn, "stock_metadata")
