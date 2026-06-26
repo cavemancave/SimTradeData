@@ -98,7 +98,7 @@ run_download() {
   if [[ "$MARKET" == "us" ]]; then
     poetry run python scripts/download_us.py
   else
-    poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv
+    poetry run python scripts/download.py --tdx-download --skip-mootdx-ohlcv --skip-bonus-fix
   fi
 }
 

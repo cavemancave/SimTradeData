@@ -170,6 +170,7 @@ def run_mootdx_download(
     download_dir: str | None = None,
     refresh_fundamentals: bool = False,
     skip_ohlcv: bool = False,
+    skip_bonus_fix: bool = False,
 ) -> bool:
     """Run Mootdx download phase."""
     print("\n" + "=" * 70)
@@ -193,6 +194,7 @@ def run_mootdx_download(
             download_dir=download_dir,
             refresh_fundamentals=refresh_fundamentals,
             skip_ohlcv=skip_ohlcv,
+            skip_bonus_fix=skip_bonus_fix,
         )
         return True
     except Exception as e:
@@ -284,6 +286,11 @@ Examples:
         action="store_true",
         help="Skip mootdx per-symbol OHLCV download",
     )
+    parser.add_argument(
+        "--skip-bonus-fix",
+        action="store_true",
+        help="Skip slow baostock preclose bonus_ps correction",
+    )
 
     # TDX import options (mutually exclusive)
     tdx_group = parser.add_mutually_exclusive_group()
@@ -336,6 +343,7 @@ Examples:
             download_dir=args.download_dir,
             refresh_fundamentals=args.refresh_fundamentals,
             skip_ohlcv=skip_mootdx_ohlcv,
+            skip_bonus_fix=args.skip_bonus_fix,
         ):
             success = False
 

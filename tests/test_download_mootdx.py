@@ -181,3 +181,82 @@ def test_skip_ohlcv_empty_stock_list_still_runs_remaining_phase(monkeypatch, tmp
     assert downloader.downloaded_fundamentals is True
     assert downloader.writer.trade_days_written is True
     assert downloader.writer.benchmark_written is True
+
+
+def test_skip_bonus_fix_does_not_call_baostock_correction(monkeypatch, tmp_path):
+    class DummyLock:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeResult:
+        def fetchall(self):
+            return []
+
+        def fetchone(self):
+            return [0]
+
+    class FakeConn:
+        def execute(self, *_args, **_kwargs):
+            return FakeResult()
+
+    class FakeWriter:
+        def __init__(self):
+            self.conn = FakeConn()
+
+        def get_max_date(self, _table):
+            return "2026-06-24"
+
+        def write_trade_days(self, _df):
+            pass
+
+        def write_benchmark(self, _df):
+            pass
+
+        def close(self):
+            pass
+
+    class EmptyStockListFetcher:
+        def login(self):
+            pass
+
+        def logout(self):
+            pass
+
+        def fetch_stock_list(self):
+            return []
+
+        def fetch_trade_calendar(self, *_args):
+            return pd.DataFrame()
+
+        def fetch_index_data(self, *_args):
+            return pd.DataFrame()
+
+    class FakeDownloader:
+        last = None
+
+        def __init__(self, **_kwargs):
+            FakeDownloader.last = self
+            self.writer = FakeWriter()
+            self.unified_fetcher = EmptyStockListFetcher()
+            self.failed_stocks = []
+            self.fixed_exrights = False
+
+        def fix_exrights_precision(self):
+            self.fixed_exrights = True
+
+        def download_fundamentals_batch(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(download_mootdx, "ProcessLock", DummyLock)
+    monkeypatch.setattr(download_mootdx, "MootdxDownloader", FakeDownloader)
+    monkeypatch.setattr(download_mootdx, "DEFAULT_DB_PATH", str(tmp_path / "cn.duckdb"))
+
+    download_mootdx.download_all_data(skip_ohlcv=True, skip_bonus_fix=True)
+
+    assert FakeDownloader.last.fixed_exrights is False

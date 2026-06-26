@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SimTradeData monthly CN reconcile
+
+[Timer]
+OnCalendar=Sun *-*-1..7 03:00:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=30min
+Unit=simtradedata-monthly-cn-reconcile.service
+
+[Install]
+WantedBy=timers.target

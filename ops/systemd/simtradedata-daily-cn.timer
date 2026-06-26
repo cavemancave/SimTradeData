@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SimTradeData daily CN data refresh on weekdays after data settles
+
+[Timer]
+OnCalendar=Mon..Fri 22:30:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=15min
+Unit=simtradedata-daily-cn.service
+
+[Install]
+WantedBy=timers.target

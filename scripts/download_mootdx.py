@@ -633,6 +633,7 @@ def download_all_data(
     download_dir: str = None,
     refresh_fundamentals: bool = False,
     skip_ohlcv: bool = False,
+    skip_bonus_fix: bool = False,
 ):
     """
     Main mootdx download function.
@@ -648,6 +649,8 @@ def download_all_data(
             print("OHLCV: Skipped (expected to be handled by TDX bulk import)")
         if skip_fundamentals:
             print("Fundamentals: Skipped")
+        if skip_bonus_fix:
+            print("bonus_ps precision fix: Skipped")
         print("=" * 70)
 
         # Date range
@@ -868,11 +871,12 @@ def download_all_data(
                       f"{len(extras_stock_pool) - total_success} skipped/failed")
 
             # Fix bonus_ps precision using exchange reference prices (baostock)
-            print("\nFixing bonus_ps precision (baostock preclose)...")
-            try:
-                downloader.fix_exrights_precision()
-            except Exception as e:
-                logger.error(f"Failed to fix exrights: {e}")
+            if not skip_bonus_fix:
+                print("\nFixing bonus_ps precision (baostock preclose)...")
+                try:
+                    downloader.fix_exrights_precision()
+                except Exception as e:
+                    logger.error(f"Failed to fix exrights: {e}")
 
             # Download batch fundamentals
             if not skip_fundamentals:
@@ -974,6 +978,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip mootdx per-symbol OHLCV download",
     )
+    parser.add_argument(
+        "--skip-bonus-fix",
+        action="store_true",
+        help="Skip slow baostock preclose bonus_ps precision correction",
+    )
 
     args = parser.parse_args()
 
@@ -983,4 +992,5 @@ if __name__ == "__main__":
         download_dir=args.download_dir,
         refresh_fundamentals=args.refresh_fundamentals,
         skip_ohlcv=args.skip_ohlcv,
+        skip_bonus_fix=args.skip_bonus_fix,
     )

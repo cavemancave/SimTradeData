@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SimTradeData weekly CN quality repair
+
+[Timer]
+OnCalendar=Sat 02:00:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=30min
+Unit=simtradedata-weekly-cn-quality-repair.service
+
+[Install]
+WantedBy=timers.target

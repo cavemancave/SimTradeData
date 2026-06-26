@@ -1,0 +1,11 @@
+[Unit]
+Description=SimTradeData weekly CN quality repair
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+EnvironmentFile=-/etc/simtradedata.env
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/bash -lc 'cd "$${SIMTRADE_DATA_DIR:?Set SIMTRADE_DATA_DIR in /etc/simtradedata.env}" && exec poetry run python scripts/download.py --source mootdx --skip-mootdx-ohlcv'

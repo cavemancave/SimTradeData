@@ -1,0 +1,68 @@
+tasks:
+  - id: daily_cn_data
+    name: CN daily data refresh
+    level: daily
+    quality_goal: Publish only fresh CN market and valuation data that passes integrity gates.
+    owner: SimTradeData
+    schedule: Mon..Fri 22:30 Asia/Shanghai
+    trigger: systemd timer
+    systemd_timer: simtradedata-daily-cn.timer
+    systemd_service: simtradedata-daily-cn.service
+    command: cd "$SIMTRADE_DATA_DIR" && MARKET=cn PUBLISH_TARGETS=local DOWNLOAD_ATTEMPTS=1 INTEGRITY_STRICT=1 bash scripts/run_daily.sh
+    working_directory: $SIMTRADE_DATA_DIR
+    logs: $SIMTRADE_DATA_DIR/logs/daily
+    may_contact_baostock: true
+    may_publish: true
+    publish_targets_allowed: local, cos
+    failure_policy: Do not publish; keep previous release; inspect latest logs/daily report.
+
+  - id: weekly_cn_quality_repair
+    name: CN weekly quality repair
+    level: weekly
+    quality_goal: Improve historical corporate-action and financial-data quality outside the daily path.
+    owner: SimTradeData
+    schedule: manual first; weekly Saturday 02:00 Asia/Shanghai after validation
+    trigger: systemd timer template; enable manually after validation
+    systemd_timer: simtradedata-weekly-cn-quality-repair.timer
+    systemd_service: simtradedata-weekly-cn-quality-repair.service
+    command: cd "$SIMTRADE_DATA_DIR" && poetry run python scripts/download.py --source mootdx --skip-mootdx-ohlcv
+    working_directory: $SIMTRADE_DATA_DIR
+    logs: $SIMTRADE_DATA_DIR/logs/quality
+    may_contact_baostock: true
+    may_publish: false
+    publish_targets_allowed:
+    failure_policy: Do not retry in a loop; inspect failed symbols and rerun a bounded repair.
+
+  - id: monthly_cn_reconcile
+    name: CN monthly reconcile
+    level: monthly
+    quality_goal: Detect long-term drift without mutating data.
+    owner: SimTradeData
+    schedule: first Sunday monthly 03:00 Asia/Shanghai
+    trigger: systemd timer template; enable manually after validation
+    systemd_timer: simtradedata-monthly-cn-reconcile.timer
+    systemd_service: simtradedata-monthly-cn-reconcile.service
+    command: cd "$SIMTRADE_DATA_DIR" && poetry run python scripts/check_integrity.py --market cn --strict --json-output logs/validation/monthly_cn_reconcile.json
+    working_directory: $SIMTRADE_DATA_DIR
+    logs: $SIMTRADE_DATA_DIR/logs/validation
+    may_contact_baostock: false
+    may_publish: false
+    publish_targets_allowed:
+    failure_policy: Open a data-quality ticket; do not auto-repair from this task.
+
+  - id: manual_cn_recovery
+    name: CN manual recovery
+    level: manual
+    quality_goal: Recover from missing data, bad releases, or baseline rebuilds.
+    owner: SimTradeData
+    schedule: manual only
+    trigger: operator
+    systemd_timer:
+    systemd_service:
+    command: Use the incident-specific SimTradeData command; record it in the incident note.
+    working_directory: $SIMTRADE_DATA_DIR
+    logs: $SIMTRADE_DATA_DIR/logs
+    may_contact_baostock: true
+    may_publish: true
+    publish_targets_allowed: local, cos
+    failure_policy: Stop and preserve logs; no automatic second attempt.
