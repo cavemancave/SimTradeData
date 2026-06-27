@@ -268,24 +268,23 @@ Run the unified download (adjust host data path):
 
 ```bash
 # Linux / macOS
-docker run --rm -v $(pwd):/app -v /path/to/data:/data -w /app simtradedata:latest \
-    poetry run python scripts/download.py --tdx-download
+mkdir data
+docker run --rm \
+    -v "$(pwd)/data:/app/data" \
+    simtradedata \
+    scripts/download.py \
+    --tdx-download --skip-mootdx-ohlcv
+
 
 # Windows (PowerShell)
-docker run --rm -v ${PWD}:/app -v C:/path/to/data:/data -w /app simtradedata:latest \
-    poetry run python scripts/download.py --tdx-download
+mkdir data
+docker run --rm `
+    -v "${PWD}\data:/app/data" `
+    simtradedata `
+    scripts/download.py `
+    --tdx-download --skip-mootdx-ohlcv
 ```
 
-Export to Parquet using Docker:
-
-```bash
-docker run --rm -v $(pwd):/app -v /path/to/data:/data -w /app simtradedata:latest \
-    poetry run python scripts/export_parquet.py --market cn
-```
-
-Notes:
-- Mount a persistent host directory at `/data` so databases and exported Parquet files are kept outside the container.
-- You can pass additional flags to the scripts exactly as when running locally.
 
 ## Project Architecture
 
