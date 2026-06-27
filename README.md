@@ -254,6 +254,39 @@ rsync -a data/export/cn/ /path/to/SimTradeLab/data/cn/
 rsync -a data/export/us/ /path/to/SimTradeLab/data/us/
 ```
 
+### Option 3: Run with Docker
+
+A `Dockerfile` is provided at the repository root. Build the image and run one-off commands while mounting a host `data` directory so downloads and exports persist on the host.
+
+Build the image:
+
+```bash
+docker build -t simtradedata:latest .
+```
+
+Run the unified download (adjust host data path):
+
+```bash
+# Linux / macOS
+docker run --rm -v $(pwd):/app -v /path/to/data:/data -w /app simtradedata:latest \
+    poetry run python scripts/download.py --tdx-download
+
+# Windows (PowerShell)
+docker run --rm -v ${PWD}:/app -v C:/path/to/data:/data -w /app simtradedata:latest \
+    poetry run python scripts/download.py --tdx-download
+```
+
+Export to Parquet using Docker:
+
+```bash
+docker run --rm -v $(pwd):/app -v /path/to/data:/data -w /app simtradedata:latest \
+    poetry run python scripts/export_parquet.py --market cn
+```
+
+Notes:
+- Mount a persistent host directory at `/data` so databases and exported Parquet files are kept outside the container.
+- You can pass additional flags to the scripts exactly as when running locally.
+
 ## Project Architecture
 
 ```
@@ -482,3 +515,16 @@ This project is licensed under AGPL-3.0. See the [LICENSE](LICENSE) file for det
 ---
 
 **Status**: Production Ready | **Version**: v1.2.0 | **Last Updated**: 2026-03-13
+
+## Docker support 
+
+```bash
+# build image
+docker build -t simtradedata .
+
+# run image 
+docker run --rm \
+  -v $(pwd)/data:/app/data \
+  simtradedata scripts/download.py --tdx-download --skip-mootdx-ohlcv
+
+```
