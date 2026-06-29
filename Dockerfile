@@ -18,4 +18,5 @@ COPY . .
 # 安装当前项目
 RUN pip install -e .
 
-ENTRYPOINT ["python"]
+ENTRYPOINT []
+CMD ["/bin/bash"]

@@ -143,6 +143,10 @@ class DuckDBWriter:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.conn = duckdb.connect(str(self.db_path))
+        self.conn.execute("SET preserve_insertion_order=false")
+        self.conn.execute("SET threads=1")
+        self.conn.execute("SET memory_limit='30GB'")
+        self.conn.execute("SET temp_directory='/tmp/duckdb_swap'")
         self._init_schema()
 
         logger.info(f"DuckDBWriter initialized: {self.db_path}")

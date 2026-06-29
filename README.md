@@ -268,23 +268,35 @@ Run the unified download (adjust host data path):
 
 ```bash
 # Linux / macOS
+## Create a folder to store data
 mkdir data
-docker run --rm \
-    -v "$(pwd)/data:/app/data" \
-    simtradedata \
-    scripts/download.py \
+## Creat a folder for duckdb swap
+mkdir .tmp
+## Start docker 
+docker run --rm -it \
+    -v "$(pwd)/data:/app/data" \ 
+    -v "${PWD}\.tmp:/tmp/duckdb_swap" \
+    simtradedata 
+
+## Download data inside docker
+python3 scripts/download.py \
     --tdx-download --skip-mootdx-ohlcv
 
+## Export data
+python3 scripts/export_parquet.py
+
+## Exit docker
+exit
 
 # Windows (PowerShell)
-mkdir data
+## note the volume mount path when start docker
 docker run --rm `
     -v "${PWD}\data:/app/data" `
-    simtradedata `
-    scripts/download.py `
-    --tdx-download --skip-mootdx-ohlcv
-```
+    simtradedata 
 
+```
+## TODO
+then set data dir to data/export im SimTradeClient, but currently still only can show data from 2023, need further investigation
 
 ## Project Architecture
 
@@ -514,16 +526,3 @@ This project is licensed under AGPL-3.0. See the [LICENSE](LICENSE) file for det
 ---
 
 **Status**: Production Ready | **Version**: v1.2.0 | **Last Updated**: 2026-03-13
-
-## Docker support 
-
-```bash
-# build image
-docker build -t simtradedata .
-
-# run image 
-docker run --rm \
-  -v $(pwd)/data:/app/data \
-  simtradedata scripts/download.py --tdx-download --skip-mootdx-ohlcv
-
-```
